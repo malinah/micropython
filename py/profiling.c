@@ -36,7 +36,6 @@
 #include "py/bc0.h"
 
 #include <stdio.h>
-#include <string.h>
 
 typedef struct _mp_bytecode_prelude_t {
     uint n_state;
@@ -648,15 +647,15 @@ STATIC void extract_prelude(const byte *bytecode, mp_bytecode_prelude_t *prelude
     prelude->bytecode = ip;
 }
 
-STATIC mp_obj_dict_t* prof_fun_bytecode_parse_level(const mp_raw_code_t *rc, char *path, mp_obj_dict_t *bytecode_tree, mp_obj_dict_t *rc_map) {
+STATIC mp_obj_dict_t* prof_fun_bytecode_parse_level(const mp_raw_code_t *rc, vstr_t *path, mp_obj_dict_t *bytecode_tree, mp_obj_dict_t *rc_map) {
 
     mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
     extract_prelude(rc->data.u_byte.bytecode, prelude);
 
-    char current_path[4024];
-
-    int __attribute__((unused)) mem_ok = snprintf(current_path, MP_ARRAY_SIZE(current_path), "%s/%s", path, prelude->block_name);
-    assert(mem_ok >= 0 && mem_ok < MP_ARRAY_SIZE(current_path));
+    vstr_t *current_path = vstr_new(vstr_len(path) + 1 /* '/' */ + qstr_len(prelude->qstr_block_name) + 1 /* '\0' */);
+    vstr_add_str(current_path, vstr_str(path));
+    vstr_add_char(current_path, '/');
+    vstr_add_str(current_path, qstr_str(prelude->qstr_block_name));
 
     // How many instructions to parse? (needed for the tuple allocation)
     uint instr_count = 0;
@@ -733,7 +732,7 @@ STATIC mp_obj_dict_t* prof_fun_bytecode_parse_level(const mp_raw_code_t *rc, cha
     }
 #endif
 
-    mp_obj_t path_obj = mp_obj_new_str(current_path, strlen(current_path));
+    mp_obj_t path_obj = mp_obj_new_str_from_vstr(&mp_type_str, current_path);
     mp_obj_t bytecode_tree_obj = MP_OBJ_FROM_PTR(bytecode_tree);
     mp_obj_dict_store(
         bytecode_tree_obj,
@@ -750,6 +749,7 @@ STATIC mp_obj_dict_t* prof_fun_bytecode_parse_level(const mp_raw_code_t *rc, cha
         );
     }
 
+    vstr_free(current_path);
     return bytecode_tree;
 }
 
@@ -771,7 +771,7 @@ STATIC mp_obj_t dict_soft_relookup(mp_obj_dict_t *dict, mp_obj_t *keys) {
     return dict_soft_relookup(MP_OBJ_TO_PTR(elem->value), keys+1);
 }
 
-mp_obj_t prof_fun_bytecode_parse(mp_obj_t module_fun) {
+STATIC mp_obj_t prof_fun_bytecode_parse(mp_obj_t module_fun) {
 
     mp_obj_t module_profiling = mp_obj_new_dict(0);
     mp_obj_t prof_bytecode = mp_obj_new_dict(0);
@@ -794,8 +794,10 @@ mp_obj_t prof_fun_bytecode_parse(mp_obj_t module_fun) {
 
     mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(module_fun);
 
-    prof_fun_bytecode_parse_level(fun->rc, "", MP_OBJ_TO_PTR(prof_bytecode), MP_OBJ_TO_PTR(prof_rc_map));
-
+    vstr_t *path = vstr_new(1);
+    vstr_add_str(path, "");
+    prof_fun_bytecode_parse_level(fun->rc, path, MP_OBJ_TO_PTR(prof_bytecode), MP_OBJ_TO_PTR(prof_rc_map));
+    vstr_free(path);
     return module_profiling;
 }
 
