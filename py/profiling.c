@@ -647,6 +647,14 @@ STATIC void extract_prelude(const byte *bytecode, mp_bytecode_prelude_t *prelude
     prelude->bytecode = ip;
 }
 
+void prof_rc_path(const mp_raw_code_t *rc, vstr_t *path) {
+    mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
+    extract_prelude(rc->data.u_byte.bytecode, prelude);
+    // vstr_add_str(path, vstr_str(path));
+    vstr_add_str(path, "/");
+    vstr_add_str(path, qstr_str(prelude->qstr_block_name));
+}
+
 STATIC mp_obj_dict_t* prof_fun_bytecode_parse_level(const mp_raw_code_t *rc, vstr_t *path, mp_obj_dict_t *bytecode_tree, mp_obj_dict_t *rc_map) {
 
     mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
@@ -786,15 +794,15 @@ STATIC mp_obj_t prof_fun_bytecode_parse(mp_obj_t module_fun) {
         MP_ROM_QSTR(MP_QSTR_rc_map),
         prof_rc_map
     );
-    mp_obj_dict_store(
-        module_profiling,
-        MP_ROM_QSTR(MP_QSTR_module_fun),
-        module_fun
-    );
+    // mp_obj_dict_store(
+    //     module_profiling,
+    //     MP_ROM_QSTR(MP_QSTR_module_fun),
+    //     module_fun
+    // );
 
     mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(module_fun);
 
-    vstr_t *path = vstr_new(1);
+    vstr_t *path = vstr_new(3);
     vstr_add_str(path, "");
     prof_fun_bytecode_parse_level(fun->rc, path, MP_OBJ_TO_PTR(prof_bytecode), MP_OBJ_TO_PTR(prof_rc_map));
     vstr_free(path);
@@ -807,7 +815,26 @@ STATIC mp_obj_t prof_fun_bytecode_parse(mp_obj_t module_fun) {
 //
 
 void prof_module_parse_store(mp_obj_t module_fun) {
-    mp_store_global(MP_QSTR___profiling__, prof_fun_bytecode_parse(module_fun));
+
+    return;
+
+    mp_obj_t parse = mp_const_none;
+    if (mp_map_lookup(&mp_globals_get()->map, MP_ROM_QSTR(MP_QSTR___profiling__), MP_MAP_LOOKUP)) {
+
+        mp_obj_t module_profiling = mp_load_global(MP_QSTR___profiling__);
+        mp_obj_t prof_bytecode = mp_obj_dict_get(module_profiling, MP_ROM_QSTR(MP_QSTR_bytecode));
+        mp_obj_t prof_rc_map = mp_obj_dict_get(module_profiling, MP_ROM_QSTR(MP_QSTR_rc_map));
+
+        mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(module_fun);
+
+        vstr_t *path = vstr_new(4);
+        vstr_add_str(path, "");
+        prof_fun_bytecode_parse_level(fun->rc, path, MP_OBJ_TO_PTR(prof_bytecode), MP_OBJ_TO_PTR(prof_rc_map));
+        vstr_free(path);
+    } else {
+        parse = prof_fun_bytecode_parse(module_fun);
+        mp_store_global(MP_QSTR___profiling__, parse);
+    }
 }
 
 mp_obj_t prof_module_bytecode(mp_obj_t module) {
@@ -825,6 +852,87 @@ mp_obj_t prof_module_bytecode(mp_obj_t module) {
     }
 
     return bytecode;
+}
+
+mp_obj_t prof_build_frame(mp_code_state_t *code_state) {
+
+    const byte *ip = code_state->ip;
+
+    mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
+    extract_prelude(code_state->fun_bc->bytecode, prelude);
+
+    //
+    // CODE
+    //
+    static const qstr code_fields[] = {
+        MP_QSTR_co_filename,
+        MP_QSTR_co_name,
+        MP_QSTR_co_codepath,
+    };
+    mp_obj_tuple_t *code_attr = mp_obj_new_attrtuple(
+        code_fields,
+        MP_ARRAY_SIZE(code_fields),
+        NULL
+    );
+    code_attr->items[0] = MP_OBJ_NEW_QSTR(prelude->qstr_source_file);
+    code_attr->items[1] = MP_OBJ_NEW_QSTR(prelude->qstr_block_name);
+
+    mp_obj_t rc_map = NULL;
+    mp_obj_t codepath = mp_const_none;
+
+    rc_map = dict_soft_relookup(mp_globals_get(), (mp_obj_t[]){
+        MP_ROM_QSTR(MP_QSTR___profiling__),
+        MP_ROM_QSTR(MP_QSTR_rc_map),
+        NULL}
+    );
+
+    if (rc_map) {
+        codepath = mp_obj_dict_get(rc_map, mp_obj_new_int_from_ull((uintptr_t)code_state->fun_bc->bytecode));
+    }
+
+    codepath = MP_OBJ_NEW_QSTR(prelude->qstr_block_name);
+
+    // codepath = code_state->fun_bc->path;
+    code_attr->items[2] = codepath;
+    mp_obj_t code = MP_OBJ_FROM_PTR(code_attr);
+
+    //
+    // FRAME
+    //
+    mp_obj_t frame = mp_const_none;
+    static const qstr frame_fields[] = {
+        MP_QSTR_f_code,
+        MP_QSTR_f_lineno,
+        MP_QSTR_f_instroffset,
+        MP_QSTR_f_modulename,
+        MP_QSTR_f_back
+    };
+
+    frame = mp_obj_new_attrtuple(
+        frame_fields,
+        MP_ARRAY_SIZE(frame_fields),
+        NULL
+    );
+    mp_obj_tuple_t *frame_attr = MP_OBJ_TO_PTR(frame);
+    frame_attr->items[0] = code;
+    frame_attr->items[1] = MP_OBJ_NEW_SMALL_INT(
+        get_line(prelude->line_info, ip - prelude->locals)
+    );
+    frame_attr->items[2] = MP_OBJ_NEW_SMALL_INT(
+        ip - prelude->bytecode
+    );
+    frame_attr->items[3] = mp_map_lookup(
+        &mp_globals_get()->map,
+        MP_ROM_QSTR(MP_QSTR___name__),
+        MP_MAP_LOOKUP
+    )->value;
+    if (code_state == code_state->prev_state) {
+        __asm("int $4");
+        code_state->prev_state = NULL;
+    }
+    frame_attr->items[4] = code_state->prev_state ? code_state->prev_state->frame : mp_const_false;
+
+    return frame;
 }
 
 mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
@@ -866,6 +974,8 @@ mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
     if (rc_map) {
         codepath = mp_obj_dict_get(rc_map, mp_obj_new_int_from_ull((uintptr_t)code_state->fun_bc->bytecode));
     }
+
+    // codepath = code_state->fun_bc->path;
     code_attr->items[2] = codepath;
     mp_obj_t code = MP_OBJ_FROM_PTR(code_attr);
 
@@ -877,7 +987,8 @@ mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
         MP_QSTR_f_lineno,
         MP_QSTR_f_instroffset,
         MP_QSTR_f_modulename,
-        MP_QSTR_f_back
+        MP_QSTR_f_back,
+        MP_QSTR_f_disasm
     };
 
     code_state->frame = frame = mp_obj_new_attrtuple(
@@ -898,10 +1009,28 @@ mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
         MP_ROM_QSTR(MP_QSTR___name__),
         MP_MAP_LOOKUP
     )->value;
-    if (code_state == code_state->prev) {
-        code_state->prev = NULL;
+    if (code_state == code_state->prev_state) {
+        code_state->prev_state = NULL;
     }
-    frame_attr->items[4] = code_state->prev ? code_state->prev->frame : mp_const_false;
+    frame_attr->items[4] = code_state->prev_state ? code_state->prev_state->frame : mp_const_false;
+
+    // parse instruction
+    mp_obj_t instr_info = mp_obj_new_tuple(7, NULL);
+    mp_obj_tuple_t *instr_info_ptr = MP_OBJ_TO_PTR(instr_info);
+    instr_info_ptr->items[0] = MP_OBJ_NEW_SMALL_INT(ip - prelude->bytecode);
+    instr_info_ptr->items[1] = MP_OBJ_NEW_SMALL_INT(get_line(prelude->line_info, ip - prelude->locals));
+    mp_dis_instruction _instruction, *instruction = &_instruction;
+    const byte *next_ip = opcode_decode(ip, code_state->fun_bc->rc->data.u_byte.const_table, instruction);
+    size_t opcode_size = next_ip - ip;
+
+    // Since the tuple is immutable removing the const qualifier here
+    // shuldn't matter right?
+    instr_info_ptr->items[2] = (mp_obj_t)instruction->opname;
+    instr_info_ptr->items[3] = (mp_obj_t)instruction->arg;
+    instr_info_ptr->items[4] = (mp_obj_t)instruction->argval;
+    instr_info_ptr->items[5] = (mp_obj_t)instruction->cache;
+    instr_info_ptr->items[6] = mp_obj_new_bytearray(opcode_size, (void*)ip);
+    frame_attr->items[5] = instr_info;
 
     switch (*ip) {
         case MP_BC_RETURN_VALUE:

@@ -39,4 +39,7 @@ mp_obj_t prof_module_bytecode(mp_obj_t module);
 // For each instruction in VM execute this function.
 mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException);
 
+void prof_rc_path(const mp_raw_code_t *rc, vstr_t *path);
+mp_obj_t prof_build_frame(mp_code_state_t *code_state);
+
 #endif // MICROPY_INCLUDED_PY_PROFILING_H

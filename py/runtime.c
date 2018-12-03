@@ -128,7 +128,7 @@ void mp_init(void) {
     MP_STATE_VM(exitfunc) = mp_const_none;
     MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
     MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
-    MP_STATE_THREAD(prof_code_state) = NULL;
+    MP_STATE_THREAD(prof_last_code_state) = NULL;
     #endif
 
     #if MICROPY_PY_THREAD_GIL
@@ -1440,7 +1440,7 @@ mp_obj_t mp_parse_compile_execute(mp_lexer_t *lex, mp_parse_input_kind_t parse_i
         } else {
             #if MICROPY_PY_SYS_PROFILING
             if (true
-                && parse_input_kind == MP_PARSE_FILE_INPUT
+                // && parse_input_kind == MP_PARSE_FILE_INPUT
                 && globals != NULL
             ) {
                 prof_module_parse_store(module_fun);

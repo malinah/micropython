@@ -230,7 +230,7 @@ typedef struct _mp_state_thread_t {
     #if MICROPY_PY_SYS_PROFILING
     mp_obj_t prof_instr_tick_callback;
     bool prof_instr_tick_callback_is_executing;
-    void *prof_code_state;
+    struct _mp_code_state_t *prof_last_code_state;
     #endif
 
     nlr_buf_t *nlr_top; // ROOT POINTER

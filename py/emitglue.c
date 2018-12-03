@@ -35,6 +35,8 @@
 #include "py/runtime0.h"
 #include "py/bc.h"
 
+#include "py/profiling.h"
+
 #if MICROPY_DEBUG_VERBOSE // print debugging info
 #define DEBUG_PRINT (1)
 #define WRITE_CODE (1)
@@ -149,10 +151,25 @@ mp_obj_t mp_make_function_from_raw_code(const mp_raw_code_t *rc, mp_obj_t def_ar
             break;
     }
 
+    #if MICROPY_PY_SYS_PROFILING
+    ((mp_obj_fun_bc_t *)MP_OBJ_TO_PTR(fun))->rc = rc;
+    #endif
+    
     // check for generator functions and if so wrap in generator object
     if ((rc->scope_flags & MP_SCOPE_FLAG_GENERATOR) != 0) {
         fun = mp_obj_new_gen_wrap(fun);
     }
+
+    #if 0
+    vstr_t *path = vstr_new(1);
+    vstr_add_str(path, "");
+    if (MP_STATE_THREAD(prof_last_code_state)) {
+        vstr_add_str(path, mp_obj_str_get_str(MP_STATE_THREAD(prof_last_code_state)->fun_bc->path));
+    }
+    prof_rc_path(rc, path);
+    ((mp_obj_fun_bc_t *)MP_OBJ_TO_PTR(fun))->path = mp_obj_new_str_from_vstr(&mp_type_str, path);
+    vstr_free(path);
+    #endif
 
     return fun;
 }

@@ -97,15 +97,6 @@ STATIC const MP_DEFINE_STR_OBJ(platform_obj, MICROPY_PY_SYS_PLATFORM);
 
 // exit([retval]): raise SystemExit, with optional argument given to the exception
 STATIC mp_obj_t mp_sys_exit(size_t n_args, const mp_obj_t *args) {
-
-    #if MICROPY_PY_SYS_PROFILING
-    if (mp_obj_is_callable(MP_STATE_VM(exitfunc))) {
-        mp_obj_t f = MP_STATE_VM(exitfunc);
-        MP_STATE_VM(exitfunc) = mp_const_none;
-        mp_call_function_0(f);
-    }
-    #endif
-
     mp_obj_t exc;
     if (n_args == 0) {
         exc = mp_obj_new_exception(&mp_type_SystemExit);
@@ -177,11 +168,18 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_sys_prof_mode_obj, 0, 1, mp_sys_prof_mode
 // settrace(tracefunc): Set the system’s trace function.
 STATIC mp_obj_t mp_sys_settrace(mp_obj_t obj) {
 
+    if (!MP_STATE_THREAD(prof_last_code_state)) {
+        mp_raise_msg(&mp_type_NotImplementedError, "missing code_state");
+        return mp_const_none;
+    }
+
     if (mp_obj_is_callable(obj)) {
-        MP_STATE_THREAD(prof_instr_tick_callback) = obj;
+        MP_STATE_THREAD(prof_last_code_state)->next_tracing_callback = obj;
+        // MP_STATE_THREAD(prof_instr_tick_callback) = obj;
     } else {
-        MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
-        MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
+        MP_STATE_THREAD(prof_last_code_state)->next_tracing_callback = mp_const_none;
+        // MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
+        // MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
     }
 
     return mp_const_none;

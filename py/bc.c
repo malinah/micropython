@@ -115,8 +115,13 @@ void mp_setup_code_state(mp_code_state_t *code_state, size_t n_args, size_t n_kw
     // ip comes in as an offset into bytecode, so turn it into a true pointer
     code_state->ip = self->bytecode + (size_t)code_state->ip;
 
-    #if MICROPY_STACKLESS || MICROPY_PY_SYS_PROFILING
+    #if MICROPY_STACKLESS
     code_state->prev = NULL;
+    #endif
+
+    #if MICROPY_PY_SYS_PROFILING
+    code_state->prev_state = NULL;
+    code_state->next_tracing_callback = mp_const_none;
     #endif
 
     // get params

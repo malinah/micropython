@@ -74,10 +74,12 @@ mp_obj_t mp_obj_new_attrtuple(const qstr *fields, size_t n, const mp_obj_t *item
     mp_obj_tuple_t *o = m_new_obj_var(mp_obj_tuple_t, mp_obj_t, n + 1);
     o->base.type = &mp_type_attrtuple;
     o->len = n;
-    for (size_t i = 0; i < n; i++) {
-        if (items) {
+    if (items) {
+        for (size_t i = 0; i < n; i++) {
             o->items[i] = items[i];
-        } else {
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
             o->items[i] = mp_const_false;
         }
     }

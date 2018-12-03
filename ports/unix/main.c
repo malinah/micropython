@@ -153,6 +153,14 @@ STATIC int execute_from_lexer(int source_kind, const void *source, mp_parse_inpu
                 MP_STATE_VM(mp_pending_exception) = MP_OBJ_NULL;
                 nlr_raise(obj);
             }
+
+            #if MICROPY_PY_SYS_PROFILING
+            if (mp_obj_is_callable(MP_STATE_VM(exitfunc))) {
+                mp_obj_t f = MP_STATE_VM(exitfunc);
+                MP_STATE_VM(exitfunc) = mp_const_none;
+                mp_call_function_0(f);
+            }
+            #endif
         }
 
         mp_hal_set_interrupt_char(-1);

@@ -39,6 +39,9 @@ typedef struct _mp_obj_fun_bc_t {
     const mp_uint_t *const_table;   // constant table
 #if MICROPY_PY_SYS_PROFILING
     const mp_raw_code_t *rc;
+    vstr_t *path;
+    int eval_cnt;
+    int listgen_cnt;
 #endif
     // the following extra_args array is allocated space to take (in order):
     //  - values of positional default args (if any)
