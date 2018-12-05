@@ -112,31 +112,13 @@
     CLEAR_SYS_EXC_INFO() /* just clear sys.exc_info(), not compliant, but it shouldn't be used in 1st place */
 
 #if MICROPY_PY_SYS_PROFILING
-#define PROFILING_BLOCK(isException) \
-do { if ( true \
-    && MP_STATE_VM(prof_mode) \
-    && mp_obj_is_callable(MP_STATE_THREAD(prof_instr_tick_callback)) \
-    && MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false \
-){ \
-    prof_instr_tick(code_state, isException); \
-}}while(0);
-#define BEFORE_RETURN() do { \
-if (MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false) { \
-    MP_STATE_THREAD(prof_last_code_state) = code_state; \
-    MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none; \
-    if (code_state->prev_state) { \
-        MP_STATE_THREAD(prof_instr_tick_callback) = code_state->prev_state->next_tracing_callback; \
-    } \
-}} while(0);
-#define FRAME_PUSH() do { \
-if (MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false) { \
-    code_state->frame = prof_build_frame(code_state); \
-    /* mp_printf(&mp_plat_print, "store current state\n"); */ \
-    MP_STATE_THREAD(prof_last_code_state) = code_state; \
-}} while(0);
+#define PROFILING_BLOCK(isException) prof_tick(code_state, isException)
+#define BEFORE_RETURN() do { prof_before_return(code_state); } while(0)
+#define FRAME_PUSH() do { prof_frame_push(code_state); } while(0)
 #else
 #define PROFILING_BLOCK(isException)
 #define AFTER_RETURN()
+#define BEFORE_RETURN()
 #define FRAME_PUSH()
 #endif
 
@@ -185,8 +167,14 @@ run_code_state: ;
 
 #if MICROPY_PY_SYS_PROFILING
 if (MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false) {
-    // mp_printf(&mp_plat_print, "recover prev state\n");
-    code_state->prev_state = MP_STATE_THREAD(prof_last_code_state);
+    // mp_printf(&mp_plat_print, "code_state->prev_state = MP_STATE_THREAD(prof_last_code_state); // %p\n", MP_STATE_THREAD(prof_last_code_state));
+    if (MP_STATE_THREAD(prof_last_code_state) != code_state) {
+        code_state->prev_state = MP_STATE_THREAD(prof_last_code_state);
+        // mp_printf(&mp_plat_print, "MP_STATE_THREAD(prof_last_code_state) == code_state\n");
+        // __asm("int $4");
+    }
+    // mp_printf(&mp_plat_print, "PUSH* MP_STATE_THREAD(prof_last_code_state) = code_state; // %p\n", code_state);
+    
 }
 #endif // MICROPY_PY_SYS_PROFILING
 
@@ -1171,7 +1159,7 @@ unwind_return:
                         goto run_code_state_from_return;
                     }
                     #endif
-                    BEFORE_RETURN();
+                    // BEFORE_RETURN();
                     return MP_VM_RETURN_NORMAL;
 
                 ENTRY(MP_BC_RAISE_VARARGS): {
@@ -1209,7 +1197,7 @@ yield:
                     code_state->ip = ip;
                     code_state->sp = sp;
                     code_state->exc_sp = MP_TAGPTR_MAKE(exc_sp, currently_in_except_block);
-                    BEFORE_RETURN();
+                    // BEFORE_RETURN();
                     return MP_VM_RETURN_YIELD;
 
                 ENTRY(MP_BC_YIELD_FROM): {
@@ -1266,24 +1254,30 @@ yield:
                 }
 
                 ENTRY(MP_BC_IMPORT_NAME): {
+                    FRAME_PUSH();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t obj = POP();
                     SET_TOP(mp_import_name(qst, obj, TOP()));
+                    BEFORE_RETURN();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_IMPORT_FROM): {
+                    FRAME_PUSH();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t obj = mp_import_from(TOP(), qst);
                     PUSH(obj);
+                    BEFORE_RETURN();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_IMPORT_STAR):
+                    FRAME_PUSH();
                     MARK_EXC_IP_SELECTIVE();
                     mp_import_all(POP());
+                    BEFORE_RETURN();
                     DISPATCH();
 
 #if MICROPY_OPT_COMPUTED_GOTO
@@ -1339,7 +1333,7 @@ yield:
                     mp_obj_t obj = mp_obj_new_exception_msg(&mp_type_NotImplementedError, "byte code not implemented");
                     nlr_pop();
                     fastn[0] = obj;
-                    BEFORE_RETURN();
+                    // BEFORE_RETURN();
                     return MP_VM_RETURN_EXCEPTION;
                 }
 
@@ -1535,7 +1529,7 @@ unwind_loop:
                 // propagate exception to higher level
                 // TODO what to do about ip and sp? they don't really make sense at this point
                 fastn[0] = MP_OBJ_FROM_PTR(nlr.ret_val); // must put exception here because sp is invalid
-                BEFORE_RETURN();
+                // BEFORE_RETURN();
                 return MP_VM_RETURN_EXCEPTION;
             }
         }

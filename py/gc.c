@@ -542,6 +542,7 @@ found:
     gc_dump_alloc_table();
     #endif
 
+    memset((byte*)ret_ptr, 0, n_bytes);
     return ret_ptr;
 }
 

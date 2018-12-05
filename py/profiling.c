@@ -1010,6 +1010,7 @@ mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
         MP_MAP_LOOKUP
     )->value;
     if (code_state == code_state->prev_state) {
+        __asm("int $4");
         code_state->prev_state = NULL;
     }
     frame_attr->items[4] = code_state->prev_state ? code_state->prev_state->frame : mp_const_false;
@@ -1061,6 +1062,37 @@ mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
     mp_obj_t top = mp_call_function_n_kw(MP_STATE_THREAD(prof_instr_tick_callback), 3, 0, args);
     MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
     return top;
+}
+
+void prof_before_return(mp_code_state_t *code_state) {
+    if (MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false) {
+        // mp_printf(&mp_plat_print, "RETURN MP_STATE_THREAD(prof_last_code_state) = code_state; // %p\n", code_state);
+        MP_STATE_THREAD(prof_last_code_state) = code_state;
+        MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
+        if (code_state->prev_state) {
+            MP_STATE_THREAD(prof_instr_tick_callback) = code_state->prev_state->next_tracing_callback;
+        }
+    }
+}
+
+void prof_frame_push(mp_code_state_t *code_state) {
+    if (MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false) {
+        code_state->frame = prof_build_frame(code_state);
+        /* mp_printf(&mp_plat_print, "store current state\n"); */
+        /* mp_printf(&mp_plat_print, "PUSH %s:%d MP_STATE_THREAD(prof_last_code_state) = code_state; // %p\n", __FILE__, __LINE__, code_state); */
+        MP_STATE_THREAD(prof_last_code_state) = code_state;
+    }
+}
+
+
+void prof_tick(mp_code_state_t *code_state, bool isException) {
+    if ( true
+        && MP_STATE_VM(prof_mode)
+        && mp_obj_is_callable(MP_STATE_THREAD(prof_instr_tick_callback))
+        && MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false
+    ){
+        prof_instr_tick(code_state, isException);
+    }
 }
 
 #endif // MICROPY_PY_SYS_PROFILING

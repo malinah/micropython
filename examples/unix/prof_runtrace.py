@@ -106,18 +106,6 @@ def atexit():
     print("\nModule __main__ bytecode dump of do():",)
     print_bytecode('do', __prof__.bytecodes['__main__']['/<module>/do'])
 
-
-# Register atexit handler that will be executed before sys.exit().
-# sys.atexit(atexit)
-
-# Don't start tracing yet.
-# sys.prof_mode(0)
-
-# Register the tracing callback.
-sys.settrace(instr_tick_handler)
-
-print(999)
-
 def factorial(n):
     if n == 0:
         # Display the bubbling stacktrace from this nested call.
@@ -210,6 +198,15 @@ def do():
 
     print('>2')
     print('>1')
+
+# Register atexit handler that will be executed before sys.exit().
+# sys.atexit(atexit)
+
+# Don't start tracing yet.
+# sys.prof_mode(0)
+
+# Register the tracing callback.
+sys.settrace(instr_tick_handler)
 
 # Start the tracing now.
 # sys.prof_mode(1)
