@@ -118,30 +118,10 @@ mp_vm_return_kind_t mp_obj_gen_resume(mp_obj_t self_in, mp_obj_t send_value, mp_
         }
     }
 
-    #if !MICROPY_STACKLESS && MICROPY_PY_SYS_PROFILING && 0
-    (&self->code_state)->prev = MP_STATE_THREAD(prof_last_code_state);
-    #endif
-    #if MICROPY_PY_SYS_PROFILING && 0
-    if (MP_STATE_THREAD(prof_last_code_state)) {
-        MP_STATE_THREAD(prof_instr_tick_callback) = MP_STATE_THREAD(prof_last_code_state)->next_tracing_callback;
-    }
-    (&self->code_state)->frame = mp_const_false;
-    (&self->code_state)->next_tracing_callback = mp_const_none;
-    MP_STATE_THREAD(prof_last_code_state) = (&self->code_state);
-    #endif
-
     mp_obj_dict_t *old_globals = mp_globals_get();
     mp_globals_set(self->globals);
     mp_vm_return_kind_t ret_kind = mp_execute_bytecode(&self->code_state, throw_value);
     mp_globals_set(old_globals);
-
-    #if MICROPY_PY_SYS_PROFILING && 0
-    MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
-    if (MP_STATE_THREAD(prof_last_code_state) && MP_STATE_THREAD(prof_last_code_state)->prev) {
-        MP_STATE_THREAD(prof_instr_tick_callback) = MP_STATE_THREAD(prof_last_code_state)->prev->next_tracing_callback;
-        MP_STATE_THREAD(prof_last_code_state) = MP_STATE_THREAD(prof_last_code_state)->prev;
-    }
-    #endif
 
     switch (ret_kind) {
         case MP_VM_RETURN_NORMAL:

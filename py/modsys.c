@@ -169,17 +169,14 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_sys_prof_mode_obj, 0, 1, mp_sys_prof_mode
 STATIC mp_obj_t mp_sys_settrace(mp_obj_t obj) {
 
     if (!MP_STATE_THREAD(prof_last_code_state)) {
-        mp_raise_msg(&mp_type_NotImplementedError, "missing code_state");
+        mp_raise_msg(&mp_type_NotImplementedError, "Missing code_state. VM corrupted!");
         return mp_const_none;
     }
 
     if (mp_obj_is_callable(obj)) {
         MP_STATE_THREAD(prof_last_code_state)->next_tracing_callback = obj;
-        // MP_STATE_THREAD(prof_instr_tick_callback) = obj;
     } else {
         MP_STATE_THREAD(prof_last_code_state)->next_tracing_callback = mp_const_none;
-        // MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
-        // MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
     }
 
     return mp_const_none;
