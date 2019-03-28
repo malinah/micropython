@@ -83,10 +83,10 @@ typedef struct _mp_code_state_t {
     #if MICROPY_STACKLESS
     struct _mp_code_state_t *prev;
     #endif
-    #if MICROPY_PY_SYS_PROFILING
+    #if MICROPY_PY_SYS_TRACE
     struct _mp_code_state_t *prev_state;
     mp_obj_t next_tracing_callback;
-    mp_obj_t frame;
+    struct _mp_obj_frame_t *frame;
     #endif
     // Variable-length
     mp_obj_t state[0];
@@ -100,6 +100,7 @@ const byte *mp_decode_uint_skip(const byte *ptr);
 
 mp_vm_return_kind_t mp_execute_bytecode(mp_code_state_t *code_state, volatile mp_obj_t inject_exc);
 mp_code_state_t *mp_obj_fun_bc_prepare_codestate(mp_obj_t func, size_t n_args, size_t n_kw, const mp_obj_t *args);
+mp_code_state_t *mp_obj_fun_bc_prepare_codestate_no_glob(mp_obj_t func, size_t n_args, size_t n_kw, const mp_obj_t *args);
 void mp_setup_code_state(mp_code_state_t *code_state, size_t n_args, size_t n_kw, const mp_obj_t *args);
 void mp_bytecode_print(const void *descr, const byte *code, mp_uint_t len, const mp_uint_t *const_table);
 void mp_bytecode_print2(const byte *code, size_t len, const mp_uint_t *const_table);

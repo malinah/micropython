@@ -28,18 +28,74 @@
 #define MICROPY_INCLUDED_PY_PROFILING_H
 
 #include "py/objtype.h"
+#include "py/objgenerator.h"
+#include "py/objfun.h"
 #include "py/bc.h"
 
-// Parses and stores module bytecode into its context globals()->__profiling__
-void prof_module_parse_store(mp_obj_t module_fun);
+#if MICROPY_PY_SYS_TRACE
 
-// Retrieve module bytecode from module->globals->__profiling__
-mp_obj_t prof_module_bytecode(mp_obj_t module);
+typedef struct _mp_obj_code_t {
+    mp_obj_base_t base;
+    const mp_raw_code_t *rc;
+    mp_obj_dict_t *dict_locals;
+} mp_obj_code_t;
+
+typedef struct _mp_obj_frame_t {
+    mp_obj_base_t base;
+    const mp_code_state_t *code_state;
+    struct _mp_obj_frame_t *back;
+    mp_obj_code_t *code;
+    mp_uint_t lasti;
+    mp_uint_t lineno;
+    bool trace_opcodes;
+} mp_obj_frame_t;
+
+typedef struct __attribute__((__packed__)) {
+    struct _mp_obj_frame_t * frame;
+    mp_obj_t event;
+    mp_obj_t arg;
+} prof_callback_args;
+
+typedef struct _mp_dis_instruction {
+    mp_obj_t opcode;
+    mp_obj_t opname;
+    mp_obj_t arg;
+    mp_obj_t argval;
+    mp_obj_t cache;
+} mp_dis_instruction;
+
+typedef struct _mp_obj_closure_t {
+    mp_obj_base_t base;
+    mp_obj_t fun;
+    size_t n_closed;
+    mp_obj_t closed[];
+} mp_obj_closure_t;
+
+typedef struct _prof_line_stats {
+    size_t line_exec;
+    size_t instr_no;
+    size_t instr_exec;
+} prof_line_stats;
+
+mp_obj_t mp_obj_new_code(const mp_raw_code_t *rc);
+mp_obj_t mp_obj_new_frame(const mp_code_state_t *code_state);
+
+void prof_extract_prelude(const byte *bytecode, mp_bytecode_prelude_t *prelude);
+uint get_line(const byte *line_info, size_t bc);
+
+const byte *prof_opcode_decode(const byte *ip, const mp_uint_t *const_table, mp_dis_instruction *instruction);
+
 
 // For each instruction in VM execute this function.
 mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException);
 
-void prof_rc_path(const mp_raw_code_t *rc, vstr_t *path);
 mp_obj_t prof_build_frame(mp_code_state_t *code_state);
+
+mp_obj_t prof_settrace(mp_obj_t callback);
+
+
+mp_obj_t prof_callback_invoke(mp_obj_t callback, prof_callback_args *args);
+
+#endif
 
 #endif // MICROPY_INCLUDED_PY_PROFILING_H

@@ -40,7 +40,6 @@
 #include "py/builtin.h"
 #include "py/stackctrl.h"
 #include "py/gc.h"
-#include "py/profiling.h"
 
 #if MICROPY_DEBUG_VERBOSE // print debugging info
 #define DEBUG_PRINT (1)
@@ -123,9 +122,12 @@ void mp_init(void) {
     MP_STATE_VM(vfs_mount_table) = NULL;
     #endif
 
-    #if MICROPY_PY_SYS_PROFILING
-    MP_STATE_VM(prof_mode) = 0;
+    #if MICROPY_PY_SYS_UATEXIT
     MP_STATE_VM(exitfunc) = mp_const_none;
+    #endif
+
+    #if MICROPY_PY_SYS_TRACE
+    MP_STATE_THREAD(prof_call_trace_callback) = mp_const_none;
     MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none;
     MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
     MP_STATE_THREAD(prof_last_code_state) = NULL;
@@ -1438,14 +1440,6 @@ mp_obj_t mp_parse_compile_execute(mp_lexer_t *lex, mp_parse_input_kind_t parse_i
             // for compile only, return value is the module function
             ret = module_fun;
         } else {
-            #if MICROPY_PY_SYS_PROFILING
-            if (true
-                // && parse_input_kind == MP_PARSE_FILE_INPUT
-                && globals != NULL
-            ) {
-                prof_module_parse_store(module_fun);
-            }
-            #endif
             // execute module function and get return value
             ret = mp_call_function_0(module_fun);
         }

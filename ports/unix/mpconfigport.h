@@ -28,7 +28,6 @@
 
 #define MICROPY_ALLOC_PATH_MAX      (PATH_MAX)
 #define MICROPY_PERSISTENT_CODE_LOAD (1)
-#define MICROPY_PERSISTENT_CODE_SAVE (1)
 #if !defined(MICROPY_EMIT_X64) && defined(__x86_64__)
     #define MICROPY_EMIT_X64        (1)
 #endif
@@ -98,7 +97,7 @@
 #define MICROPY_PY_SYS_MAXSIZE      (1)
 #define MICROPY_PY_SYS_STDFILES     (1)
 #define MICROPY_PY_SYS_EXC_INFO     (1)
-#define MICROPY_PY_SYS_PROFILING    (1)
+#define MICROPY_PY_SYS_TRACE    (0)
 #define MICROPY_PY_COLLECTIONS_DEQUE (1)
 #define MICROPY_PY_COLLECTIONS_ORDEREDDICT (1)
 #ifndef MICROPY_PY_MATH_SPECIAL_FUNCTIONS
@@ -110,7 +109,7 @@
 #define MICROPY_MODULE_FROZEN_STR   (1)
 
 #ifndef MICROPY_STACKLESS
-#define MICROPY_STACKLESS           (1)
+#define MICROPY_STACKLESS           (0)
 #define MICROPY_STACKLESS_STRICT    (0)
 #endif
 

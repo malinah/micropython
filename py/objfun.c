@@ -33,6 +33,7 @@
 #include "py/runtime.h"
 #include "py/bc.h"
 #include "py/stackctrl.h"
+#include "py/profiling.h"
 
 #if MICROPY_DEBUG_VERBOSE // print debugging info
 #define DEBUG_PRINT (1)
@@ -216,6 +217,38 @@ STATIC void dump_args(const mp_obj_t *a, size_t sz) {
     mp_setup_code_state(code_state, n_args, n_kw, args); \
     code_state->old_globals = mp_globals_get();
 
+#if MICROPY_PY_SYS_TRACE
+mp_code_state_t *mp_obj_fun_bc_prepare_codestate_no_glob(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+    MP_STACK_CHECK();
+    mp_obj_fun_bc_t *self = MP_OBJ_TO_PTR(self_in);
+
+    size_t n_state, state_size;
+    DECODE_CODESTATE_SIZE(self->bytecode, n_state, state_size);
+
+    mp_code_state_t *code_state;
+    #if MICROPY_ENABLE_PYSTACK
+    code_state = mp_pystack_alloc(sizeof(mp_code_state_t) + state_size);
+    #else
+    // If we use m_new_obj_var(), then on no memory, MemoryError will be
+    // raised. But this is not correct exception for a function call,
+    // RuntimeError should be raised instead. So, we use m_new_obj_var_maybe(),
+    // return NULL, then vm.c takes the needed action (either raise
+    // RuntimeError or fallback to stack allocation).
+    code_state = m_new_obj_var_maybe(mp_code_state_t, byte, state_size);
+    if (!code_state) {
+        return NULL;
+    }
+    #endif
+
+    INIT_CODESTATE(code_state, self, n_args, n_kw, args);
+
+    // execute the byte code with the correct globals context
+    // mp_globals_set(self->globals);
+
+    return code_state;
+}
+#endif
+
 #if MICROPY_STACKLESS
 mp_code_state_t *mp_obj_fun_bc_prepare_codestate(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     MP_STACK_CHECK();
@@ -280,6 +313,32 @@ STATIC mp_obj_t fun_bc_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const 
 
     // execute the byte code with the correct globals context
     mp_globals_set(self->globals);
+
+    #if MICROPY_PY_SYS_TRACE && false
+    if (!MP_STATE_THREAD(prof_instr_tick_callback_is_executing)) {
+        mp_obj_t callback = MP_STATE_THREAD(prof_call_trace_callback);
+        if (mp_obj_is_callable(callback)) {
+            code_state->prev_state = MP_STATE_THREAD(prof_last_code_state);
+            mp_obj_t frame = prof_build_frame(code_state);
+            mp_obj_fun_bc_t *self_fun = MP_OBJ_TO_PTR(self_in);
+            ((mp_obj_tuple_t*)MP_OBJ_TO_PTR(frame))->items[4] = self_fun->line_def;
+            mp_obj_t args[3];
+            args[0] = frame;
+            args[1] = MP_ROM_QSTR(MP_QSTR_call);
+            args[2] = mp_const_none;
+            MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = true;
+            mp_obj_t top = mp_call_function_n_kw(callback, 3, 0, args);
+            MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
+            if (MP_STATE_VM(mp_pending_exception) != MP_OBJ_NULL) {
+                mp_obj_t obj = MP_STATE_VM(mp_pending_exception);
+                MP_STATE_VM(mp_pending_exception) = MP_OBJ_NULL;
+                nlr_raise(obj);
+            }
+            code_state->prev_state->next_tracing_callback = top;
+        }
+    }
+    #endif
+
     mp_vm_return_kind_t vm_return_kind = mp_execute_bytecode(code_state, MP_OBJ_NULL);
     mp_globals_set(code_state->old_globals);
 

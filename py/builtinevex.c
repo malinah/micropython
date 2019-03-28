@@ -30,7 +30,6 @@
 #include "py/compile.h"
 #include "py/runtime.h"
 #include "py/builtin.h"
-#include "py/profiling.h"
 
 #if MICROPY_PY_BUILTINS_COMPILE
 

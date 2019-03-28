@@ -228,6 +228,7 @@ STATIC void emit_write_bytecode_byte_uint(emit_t *emit, byte b, mp_uint_t val) {
 #if MICROPY_PERSISTENT_CODE
 STATIC void emit_write_bytecode_byte_const(emit_t *emit, byte b, mp_uint_t n, mp_uint_t c) {
     if (emit->pass == MP_PASS_EMIT) {
+        // mp_printf(&mp_plat_print, "%p @ emit->const_table[%d] = %d;\n", emit->const_table, n, c);
         emit->const_table[n] = c;
     }
     emit_write_bytecode_byte_uint(emit, b, n);
@@ -275,6 +276,9 @@ STATIC void emit_write_bytecode_byte_raw_code(emit_t *emit, byte b, mp_raw_code_
     // Verify thar c is already uint-aligned
     assert(c == MP_ALIGN(c, sizeof(void*)));
     *c = rc;
+    #endif
+    #if MICROPY_PY_SYS_TRACE
+    rc->line_def = emit->last_source_line;
     #endif
 }
 
@@ -396,6 +400,7 @@ void mp_emit_bc_start_pass(emit_t *emit, pass_kind_t pass, scope_t *scope) {
                 }
             }
             emit->const_table[i] = (mp_uint_t)MP_OBJ_NEW_QSTR(qst);
+            // mp_printf(&mp_plat_print, "%p @ emit->const_table[%d] = %d;\n", emit->const_table, i, emit->const_table[i]);
         }
     }
 }

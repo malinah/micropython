@@ -135,10 +135,8 @@ typedef struct _mp_state_vm_t {
     // dictionary with loaded modules (may be exposed as sys.modules)
     mp_obj_dict_t mp_loaded_modules_dict;
 
-    #if MICROPY_PY_SYS_PROFILING
-    // exposed through sys.prof_mode function
-    int prof_mode;
-    // exposed through sys.atexit function
+    #if MICROPY_PY_SYS_UATEXIT
+    // exposed through sys.uatexit function
     mp_obj_t exitfunc;
     #endif
 
@@ -227,7 +225,8 @@ typedef struct _mp_state_thread_t {
     mp_obj_dict_t *dict_locals;
     mp_obj_dict_t *dict_globals;
 
-    #if MICROPY_PY_SYS_PROFILING
+    #if MICROPY_PY_SYS_TRACE
+    mp_obj_t prof_call_trace_callback;
     mp_obj_t prof_instr_tick_callback;
     bool prof_instr_tick_callback_is_executing;
     struct _mp_code_state_t *prof_last_code_state;

@@ -111,36 +111,85 @@
     exc_sp--; /* pop back to previous exception handler */ \
     CLEAR_SYS_EXC_INFO() /* just clear sys.exc_info(), not compliant, but it shouldn't be used in 1st place */
 
-#if MICROPY_PY_SYS_PROFILING
-#define IF_NOT_TRACING if(MP_STATE_THREAD(prof_instr_tick_callback_is_executing) == false)
-#define PROFILING_BLOCK(isException) do { IF_NOT_TRACING { \
-    if (mp_obj_is_callable(MP_STATE_THREAD(prof_instr_tick_callback))) { \
-        prof_instr_tick(code_state, isException); \
-    } \
-}} while(0)
-#define FRAME_RESTORE() do { IF_NOT_TRACING { \
+#if MICROPY_ACCESS_CODE_STATE
+#define FRAME_SETUP() do { \
+    assert(code_state != code_state->prev_state); \
     MP_STATE_THREAD(prof_last_code_state) = code_state; \
-    MP_STATE_THREAD(prof_instr_tick_callback) = mp_const_none; \
+    assert(code_state != code_state->prev_state); \
+} while(0)
+
+#define FRAME_ENTER() do { \
+    assert(code_state != code_state->prev_state); \
+    code_state->prev_state = MP_STATE_THREAD(prof_last_code_state); \
+    assert(code_state != code_state->prev_state); \
+} while(0)
+
+#define FRAME_LEAVE() do { \
+    assert(code_state != code_state->prev_state); \
+    MP_STATE_THREAD(prof_last_code_state) = code_state->prev_state; \
+    assert(code_state != code_state->prev_state); \
+} while(0)
+#else
+
+#define FRAME_SETUP()
+#define FRAME_ENTER()
+#define FRAME_LEAVE()
+#endif
+
+
+#if MICROPY_PY_SYS_TRACE
+#define TRACE_SETUP() do { \
+    assert(code_state != code_state->prev_state); \
+    assert(MP_STATE_THREAD(prof_last_code_state) == code_state); \
     if (code_state->prev_state) { \
         MP_STATE_THREAD(prof_instr_tick_callback) = code_state->prev_state->next_tracing_callback; \
     } \
-}} while(0)
-#define FRAME_SNAPSHOT() do { IF_NOT_TRACING { \
-    code_state->frame = prof_build_frame(code_state); \
-    MP_STATE_THREAD(prof_last_code_state) = code_state; \
-}} while(0)
-#define FRAME_ENTER() do { IF_NOT_TRACING { \
-    code_state->prev_state = MP_STATE_THREAD(prof_last_code_state); \
-}} while(0)
-#define FRAME_LEAVE() do { IF_NOT_TRACING { \
-    MP_STATE_THREAD(prof_last_code_state) = code_state->prev_state; \
-}} while(0)
+    MP_STATE_THREAD(prof_instr_tick_callback) = code_state->next_tracing_callback; \
+    assert(MP_STATE_THREAD(prof_instr_tick_callback)); \
+}while(0)
+
+#define TRACE_FRAMESHOT() do { \
+    assert(code_state != code_state->prev_state); \
+    assert(MP_STATE_THREAD(prof_last_code_state) == code_state); \
+    if (true \
+        /* && mp_obj_is_callable(MP_STATE_THREAD(prof_instr_tick_callback)) */ \
+        && !MP_STATE_THREAD(prof_instr_tick_callback_is_executing) \
+    ) { \
+        code_state->frame = prof_build_frame(code_state); \
+    } \
+} while(0)
+
+    #if 1
+    #define PRINT_INSTR(cIp) do { \
+        mp_dis_instruction _instruction, *instruction = &_instruction; \
+        prof_opcode_decode(cIp, code_state->fun_bc->rc->data.u_byte.const_table, instruction); \
+        mp_printf(&mp_plat_print, "instr@%d: 0x%02x %p %s [%d] ", (cIp) - code_state->fun_bc->rc->data.u_byte.prelude.locals, *(byte*)(cIp) , (cIp), mp_obj_str_get_str(instruction->opname), instruction->arg); \
+        mp_obj_print_helper(&mp_plat_print, instruction->argval, PRINT_STR); \
+        mp_printf(&mp_plat_print, "\n"); \
+    }while(0)
+    #else
+    #define PRINT_INSTR(cIp)
+    #endif
+
+#define TRACE_TICK(cIp, cSp, isException) do { \
+    assert(code_state != code_state->prev_state); \
+    assert(MP_STATE_THREAD(prof_last_code_state) == code_state); \
+    if (!MP_STATE_THREAD(prof_instr_tick_callback_is_executing)) { \
+    if (mp_obj_is_callable(MP_STATE_THREAD(prof_instr_tick_callback))) { \
+        PRINT_INSTR(cIp); \
+        code_state->ip = cIp; code_state->sp = cSp; \
+        prof_instr_tick(code_state, isException); \
+        /* FRAME_SETUP(); */ \
+        TRACE_SETUP(); \
+    }} \
+} while(0)
+
+#define TRACE_FUN_LINEDEF(fun, code_state) prof_function_def_line(fun, code_state)
 #else
-#define PROFILING_BLOCK(isException)
-#define FRAME_RESTORE()
-#define FRAME_SNAPSHOT()
-#define FRAME_ENTER()
-#define FRAME_LEAVE()
+#define TRACE_SETUP()
+#define TRACE_FRAMESHOT()
+#define TRACE_TICK(cIp, cSp, isException)
+#define TRACE_FUN_LINEDEF(fun, code_state)
 #endif
 
 // fastn has items in reverse order (fastn[0] is local[0], fastn[-1] is local[1], etc)
@@ -163,7 +212,7 @@ mp_vm_return_kind_t mp_execute_bytecode(mp_code_state_t *code_state, volatile mp
     #define DISPATCH() do { \
         TRACE(ip); \
         MARK_EXC_IP_GLOBAL(); \
-        PROFILING_BLOCK(false); \
+        TRACE_TICK(ip, sp, false); \
         goto *entry_table[*ip++]; \
     } while (0)
     #define DISPATCH_WITH_PEND_EXC_CHECK() goto pending_exception_check
@@ -186,10 +235,43 @@ mp_vm_return_kind_t mp_execute_bytecode(mp_code_state_t *code_state, volatile mp
 run_code_state: ;
 #endif // MICROPY_STACKLESS
 FRAME_ENTER();
+
+#if MICROPY_PY_SYS_TRACE
+// Trace CALL event.
+if (!MP_STATE_THREAD(prof_instr_tick_callback_is_executing)
+    && mp_obj_is_callable(MP_STATE_THREAD(prof_call_trace_callback))) {
+
+    mp_obj_frame_t *frame = MP_OBJ_TO_PTR(mp_obj_new_frame(code_state));
+    if (code_state->prev_state && code_state->frame == mp_const_none) {
+        // The frame haven't been built for the newly entered code_state
+        // which means it's a CALL event (not a GENERATOR) so set the function definition line.
+        const mp_bytecode_prelude_t *prelude = &code_state->fun_bc->rc->data.u_byte.prelude;
+        frame->lineno = 
+            code_state->fun_bc->rc->line_def ? code_state->fun_bc->rc->line_def :
+                get_line(prelude->line_info, prelude->bytecode - prelude->locals);
+    }
+    code_state->frame = MP_OBJ_FROM_PTR(frame);
+
+    prof_callback_args _args, *args=&_args;
+    args->frame = code_state->frame;
+    args->event = MP_ROM_QSTR(MP_QSTR_call);
+    args->arg = mp_const_none;
+
+    mp_obj_t callback = MP_STATE_THREAD(prof_call_trace_callback);
+    mp_obj_t top = prof_callback_invoke(callback, args);
+    
+    MP_STATE_THREAD(prof_instr_tick_callback) = code_state->next_tracing_callback = top;
+
+    // Invalidate the last executed line number.
+    frame->lineno = -1;
+}
+#endif
+
 #if MICROPY_STACKLESS
 run_code_state_from_return: ;
 #endif // MICROPY_STACKLESS
-FRAME_RESTORE();
+FRAME_SETUP();
+TRACE_SETUP();
 
     // Pointers which are constant for particular invocation of mp_execute_bytecode()
     mp_obj_t * /*const*/ fastn;
@@ -241,7 +323,7 @@ dispatch_loop:
 #else
                 TRACE(ip);
                 MARK_EXC_IP_GLOBAL();
-                PROFILING_BLOCK(false);
+                TRACE_TICK(ip, sp, false);
                 switch (*ip++) {
 #endif
 
@@ -783,6 +865,7 @@ unwind_jump:;
                 }
 
                 ENTRY(MP_BC_FOR_ITER): {
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_ULABEL; // the jump offset if iteration finishes; for labels are always forward
                     code_state->sp = sp;
@@ -799,6 +882,7 @@ unwind_jump:;
                     } else {
                         PUSH(value); // push the next iteration value
                     }
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
@@ -910,7 +994,9 @@ unwind_jump:;
 
                 ENTRY(MP_BC_MAKE_FUNCTION): {
                     DECODE_PTR;
-                    PUSH(mp_make_function_from_raw_code(ptr, MP_OBJ_NULL, MP_OBJ_NULL));
+                    mp_obj_t *fun = mp_make_function_from_raw_code(ptr, MP_OBJ_NULL, MP_OBJ_NULL);
+                    // TRACE_FUN_LINEDEF(fun, code_state);
+                    PUSH(fun);
                     DISPATCH();
                 }
 
@@ -918,7 +1004,9 @@ unwind_jump:;
                     DECODE_PTR;
                     // Stack layout: def_tuple def_dict <- TOS
                     mp_obj_t def_dict = POP();
-                    SET_TOP(mp_make_function_from_raw_code(ptr, TOP(), def_dict));
+                    mp_obj_fun_bc_t *fun = mp_make_function_from_raw_code(ptr, TOP(), def_dict);
+                    // TRACE_FUN_LINEDEF(fun, code_state);
+                    SET_TOP(fun);
                     DISPATCH();
                 }
 
@@ -927,7 +1015,9 @@ unwind_jump:;
                     size_t n_closed_over = *ip++;
                     // Stack layout: closed_overs <- TOS
                     sp -= n_closed_over - 1;
-                    SET_TOP(mp_make_closure_from_raw_code(ptr, n_closed_over, sp));
+                    mp_obj_closure_t * closure  = mp_make_closure_from_raw_code(ptr, n_closed_over, sp);
+                    // TRACE_FUN_LINEDEF(closure->fun, code_state);
+                    SET_TOP(closure);
                     DISPATCH();
                 }
 
@@ -936,12 +1026,14 @@ unwind_jump:;
                     size_t n_closed_over = *ip++;
                     // Stack layout: def_tuple def_dict closed_overs <- TOS
                     sp -= 2 + n_closed_over - 1;
-                    SET_TOP(mp_make_closure_from_raw_code(ptr, 0x100 | n_closed_over, sp));
+                    mp_obj_closure_t * closure = mp_make_closure_from_raw_code(ptr, 0x100 | n_closed_over, sp);
+                    // TRACE_FUN_LINEDEF(closure->fun, code_state);
+                    SET_TOP(closure);
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_FUNCTION): {
-                    FRAME_SNAPSHOT();
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_UINT;
                     // unum & 0xff == n_positional
@@ -972,12 +1064,12 @@ unwind_jump:;
                     }
                     #endif
                     SET_TOP(mp_call_function_n_kw(*sp, unum & 0xff, (unum >> 8) & 0xff, sp + 1));
-                    FRAME_RESTORE();
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_FUNCTION_VAR_KW): {
-                    FRAME_SNAPSHOT();
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_UINT;
                     // unum & 0xff == n_positional
@@ -1019,12 +1111,12 @@ unwind_jump:;
                     }
                     #endif
                     SET_TOP(mp_call_method_n_kw_var(false, unum, sp));
-                    FRAME_RESTORE();
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_METHOD): {
-                    FRAME_SNAPSHOT();
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_UINT;
                     // unum & 0xff == n_positional
@@ -1059,12 +1151,12 @@ unwind_jump:;
                     }
                     #endif
                     SET_TOP(mp_call_method_n_kw(unum & 0xff, (unum >> 8) & 0xff, sp));
-                    FRAME_RESTORE();
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_METHOD_VAR_KW): {
-                    FRAME_SNAPSHOT();
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_UINT;
                     // unum & 0xff == n_positional
@@ -1106,7 +1198,7 @@ unwind_jump:;
                     }
                     #endif
                     SET_TOP(mp_call_method_n_kw_var(true, unum, sp));
-                    FRAME_RESTORE();
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
@@ -1262,30 +1354,28 @@ yield:
                 }
 
                 ENTRY(MP_BC_IMPORT_NAME): {
-                    FRAME_SNAPSHOT();
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t obj = POP();
                     SET_TOP(mp_import_name(qst, obj, TOP()));
-                    FRAME_RESTORE();
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_IMPORT_FROM): {
-                    FRAME_SNAPSHOT();
+                    TRACE_FRAMESHOT();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t obj = mp_import_from(TOP(), qst);
                     PUSH(obj);
-                    FRAME_RESTORE();
+                    TRACE_SETUP();
                     DISPATCH();
                 }
 
                 ENTRY(MP_BC_IMPORT_STAR):
-                    FRAME_SNAPSHOT();
                     MARK_EXC_IP_SELECTIVE();
                     mp_import_all(POP());
-                    FRAME_RESTORE();
                     DISPATCH();
 
 #if MICROPY_OPT_COMPUTED_GOTO
@@ -1406,8 +1496,6 @@ exception_handler:
             MP_STATE_VM(cur_exception) = nlr.ret_val;
             #endif
 
-            PROFILING_BLOCK(true);
-
             #if SELECTIVE_EXC_IP
             // with selective ip, we store the ip 1 byte past the opcode, so move ptr back
             code_state->ip -= 1;
@@ -1431,6 +1519,12 @@ exception_handler:
                         goto outer_dispatch_loop; // continue with dispatch loop
                     }
                 }
+            }
+
+            if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(((mp_obj_base_t*)nlr.ret_val)->type), MP_OBJ_FROM_PTR(&mp_type_Exception))) {
+                // FRAME_SETUP();
+                TRACE_SETUP();
+                TRACE_TICK(code_state->ip, code_state->sp, true);
             }
 
 #if MICROPY_STACKLESS

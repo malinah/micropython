@@ -405,6 +405,11 @@
 /*****************************************************************************/
 /* Python internal features                                                  */
 
+// Whether to provide access to the currently running function/generator code state.
+#ifndef MICROPY_ACCESS_CODE_STATE
+#define MICROPY_ACCESS_CODE_STATE (0)
+#endif
+
 // Whether to enable import of external modules
 // When disabled, only importing of built-in modules is supported
 // When enabled, a port must implement mp_import_stat (among other things)
@@ -463,10 +468,6 @@
 // etc. Not checking means segfault on overflow.
 #ifndef MICROPY_STACK_CHECK
 #define MICROPY_STACK_CHECK (0)
-#endif
-
-#ifndef MICROPY_PY_SYS_PROFILING
-#define MICROPY_PY_SYS_PROFILING (0)
 #endif
 
 // Whether to have an emergency exception buffer
@@ -1042,6 +1043,16 @@ typedef double mp_float_t;
 #define MICROPY_PY_SYS_EXIT (1)
 #endif
 
+// Whether to provide "sys.uatexit" function
+#ifndef MICROPY_PY_SYS_UATEXIT
+#define MICROPY_PY_SYS_UATEXIT (0)
+#endif
+
+// Whether to provide "sys.settrace" function
+#ifndef MICROPY_PY_SYS_TRACE
+#define MICROPY_PY_SYS_TRACE (0)
+#endif
+
 // Whether to provide "sys.getsizeof" function
 #ifndef MICROPY_PY_SYS_GETSIZEOF
 #define MICROPY_PY_SYS_GETSIZEOF (0)
@@ -1376,10 +1387,6 @@ typedef double mp_float_t;
 # define MP_HTOBE32(x) (x)
 # define MP_BE32TOH(x) (x)
 #endif
-#endif
-
-#if MICROPY_PY_SYS_PROFILING && !MICROPY_PERSISTENT_CODE_SAVE
-#error "Profiling requires MICROPY_PERSISTENT_CODE_SAVE to be enabled"
 #endif
 
 #endif // MICROPY_INCLUDED_PY_MPCONFIG_H

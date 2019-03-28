@@ -33,10 +33,9 @@
 
 #if MICROPY_ENABLE_GC
 
-#if 0 || MICROPY_DEBUG_VERBOSE // print debugging info
-#include <stdlib.h>
+#if MICROPY_DEBUG_VERBOSE // print debugging info
 #define DEBUG_PRINT (1)
-#define DEBUG_printf printf
+#define DEBUG_printf DEBUG_printf
 #else // don't print debugging info
 #define DEBUG_PRINT (0)
 #define DEBUG_printf(...) (void)0
@@ -294,7 +293,7 @@ STATIC void gc_sweep(void) {
                 }
 #endif
                 free_tail = 1;
-                DEBUG_printf("gc_sweep(%p)\n", (void*)PTR_FROM_BLOCK(block));
+                DEBUG_printf("gc_sweep(%p)\n", PTR_FROM_BLOCK(block));
                 #if MICROPY_PY_GC_COLLECT_RETVAL
                 MP_STATE_MEM(gc_collected)++;
                 #endif
@@ -525,8 +524,6 @@ found:
     memset((byte*)ret_ptr + n_bytes, 0, (end_block - start_block + 1) * BYTES_PER_BLOCK - n_bytes);
     #endif
 
-    memset((byte*)ret_ptr, 0xcc, n_bytes);
-
     #if MICROPY_ENABLE_FINALISER
     if (has_finaliser) {
         // clear type pointer in case it is never set
@@ -581,8 +578,6 @@ void gc_free(void *ptr) {
         FTB_CLEAR(block);
         #endif
 
-        size_t start_block = block;
-
         // set the last_free pointer to this block if it's earlier in the heap
         if (block / BLOCKS_PER_ATB < MP_STATE_MEM(gc_last_free_atb_index)) {
             MP_STATE_MEM(gc_last_free_atb_index) = block / BLOCKS_PER_ATB;
@@ -593,10 +588,6 @@ void gc_free(void *ptr) {
             ATB_ANY_TO_FREE(block);
             block += 1;
         } while (ATB_GET_KIND(block) == AT_TAIL);
-
-        size_t end_block = block - 1;
-
-        memset((byte*)ptr, 0xcc, (end_block - start_block + 1) * BYTES_PER_BLOCK);
 
         GC_EXIT();
 

@@ -27,26 +27,15 @@
 
 #include <stdlib.h>
 #include <assert.h>
-
 #include "py/runtime.h"
-#include "py/bc.h"
 #include "py/objgenerator.h"
 #include "py/objfun.h"
 #include "py/stackctrl.h"
+#include "py/profiling.h"
 
 /******************************************************************************/
 /* generator wrapper                                                          */
 
-typedef struct _mp_obj_gen_wrap_t {
-    mp_obj_base_t base;
-    mp_obj_t *fun;
-} mp_obj_gen_wrap_t;
-
-typedef struct _mp_obj_gen_instance_t {
-    mp_obj_base_t base;
-    mp_obj_dict_t *globals;
-    mp_code_state_t code_state;
-} mp_obj_gen_instance_t;
 
 STATIC mp_obj_t gen_wrap_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_obj_gen_wrap_t *self = MP_OBJ_TO_PTR(self_in);
@@ -117,9 +106,33 @@ mp_vm_return_kind_t mp_obj_gen_resume(mp_obj_t self_in, mp_obj_t send_value, mp_
             *self->code_state.sp = send_value;
         }
     }
-
     mp_obj_dict_t *old_globals = mp_globals_get();
     mp_globals_set(self->globals);
+
+    #if MICROPY_PY_SYS_TRACE && false
+    if (!MP_STATE_THREAD(prof_instr_tick_callback_is_executing)) {
+        mp_obj_t callback = MP_STATE_THREAD(prof_call_trace_callback);
+        if (mp_obj_is_callable(callback)) {
+            mp_code_state_t *code_state = &self->code_state;
+            code_state->prev_state = MP_STATE_THREAD(prof_last_code_state);
+            mp_obj_t frame = prof_build_frame(code_state);
+            ((mp_obj_tuple_t*)MP_OBJ_TO_PTR(frame))->items[4] = self->code_state.fun_bc->line_def;
+            mp_obj_t args[3];
+            args[0] = frame;
+            args[1] = MP_ROM_QSTR(MP_QSTR_send);
+            args[2] = mp_const_none;
+            MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = true;
+            mp_call_function_n_kw(callback, 3, 0, args);
+            MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
+            if (MP_STATE_VM(mp_pending_exception) != MP_OBJ_NULL) {
+                mp_obj_t obj = MP_STATE_VM(mp_pending_exception);
+                MP_STATE_VM(mp_pending_exception) = MP_OBJ_NULL;
+                nlr_raise(obj);
+            }
+        }
+    }
+    #endif
+
     mp_vm_return_kind_t ret_kind = mp_execute_bytecode(&self->code_state, throw_value);
     mp_globals_set(old_globals);
 

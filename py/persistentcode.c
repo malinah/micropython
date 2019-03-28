@@ -192,6 +192,7 @@ STATIC mp_raw_code_t *load_raw_code(mp_reader_t *reader) {
         *ct++ = (mp_uint_t)MP_OBJ_NEW_QSTR(load_qstr(reader));
     }
     for (size_t i = 0; i < n_obj; ++i) {
+        // mp_printf(&mp_plat_print, "%p @ emit->const_table[%d] = %d;\n", const_table, ct-const_table, -1);
         *ct++ = (mp_uint_t)load_obj(reader);
     }
     for (size_t i = 0; i < n_raw_code; ++i) {

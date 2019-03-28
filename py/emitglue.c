@@ -34,7 +34,6 @@
 #include "py/emitglue.h"
 #include "py/runtime0.h"
 #include "py/bc.h"
-
 #include "py/profiling.h"
 
 #if MICROPY_DEBUG_VERBOSE // print debugging info
@@ -54,6 +53,9 @@ mp_uint_t mp_verbose_flag = 0;
 mp_raw_code_t *mp_emit_glue_new_raw_code(void) {
     mp_raw_code_t *rc = m_new0(mp_raw_code_t, 1);
     rc->kind = MP_CODE_RESERVED;
+    #if MICROPY_PY_SYS_TRACE
+    rc->line_def = 0;
+    #endif
     return rc;
 }
 
@@ -75,6 +77,11 @@ void mp_emit_glue_assign_bytecode(mp_raw_code_t *rc, const byte *code,
     rc->data.u_byte.bc_len = len;
     rc->data.u_byte.n_obj = n_obj;
     rc->data.u_byte.n_raw_code = n_raw_code;
+    #endif
+
+    #if MICROPY_PY_SYS_TRACE
+    mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    prof_extract_prelude(code, prelude);
     #endif
 
 #ifdef DEBUG_PRINT
@@ -148,28 +155,20 @@ mp_obj_t mp_make_function_from_raw_code(const mp_raw_code_t *rc, mp_obj_t def_ar
             // rc->kind should always be set and BYTECODE is the only remaining case
             assert(rc->kind == MP_CODE_BYTECODE);
             fun = mp_obj_new_fun_bc(def_args, def_kw_args, rc->data.u_byte.bytecode, rc->data.u_byte.const_table);
+
+            #if MICROPY_PY_SYS_TRACE
+            mp_obj_fun_bc_t *self_fun = (mp_obj_fun_bc_t *)MP_OBJ_TO_PTR(fun);
+            self_fun->rc = rc;
+            self_fun->line_def = MP_OBJ_NEW_SMALL_INT(rc->line_def);
+            #endif
+
             break;
     }
 
-    #if MICROPY_PY_SYS_PROFILING
-    ((mp_obj_fun_bc_t *)MP_OBJ_TO_PTR(fun))->rc = rc;
-    #endif
-    
     // check for generator functions and if so wrap in generator object
     if ((rc->scope_flags & MP_SCOPE_FLAG_GENERATOR) != 0) {
         fun = mp_obj_new_gen_wrap(fun);
     }
-
-    #if 0
-    vstr_t *path = vstr_new(1);
-    vstr_add_str(path, "");
-    if (MP_STATE_THREAD(prof_last_code_state)) {
-        vstr_add_str(path, mp_obj_str_get_str(MP_STATE_THREAD(prof_last_code_state)->fun_bc->path));
-    }
-    prof_rc_path(rc, path);
-    ((mp_obj_fun_bc_t *)MP_OBJ_TO_PTR(fun))->path = mp_obj_new_str_from_vstr(&mp_type_str, path);
-    vstr_free(path);
-    #endif
 
     return fun;
 }

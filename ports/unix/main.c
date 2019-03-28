@@ -45,7 +45,6 @@
 #include "py/stackctrl.h"
 #include "py/mphal.h"
 #include "py/mpthread.h"
-#include "py/profiling.h"
 #include "extmod/misc.h"
 #include "genhdr/mpversion.h"
 #include "input.h"
@@ -139,12 +138,6 @@ STATIC int execute_from_lexer(int source_kind, const void *source, mp_parse_inpu
         mp_obj_t module_fun = mp_compile(&parse_tree, source_name, emit_opt, is_repl);
 
         if (!compile_only) {
-            #if MICROPY_PY_SYS_PROFILING
-            if (MP_STATE_VM(prof_mode)) {
-                prof_module_parse_store(module_fun);
-            }
-            #endif
-            
             // execute it
             mp_call_function_0(module_fun);
             // check for pending exception
@@ -153,14 +146,6 @@ STATIC int execute_from_lexer(int source_kind, const void *source, mp_parse_inpu
                 MP_STATE_VM(mp_pending_exception) = MP_OBJ_NULL;
                 nlr_raise(obj);
             }
-
-            #if MICROPY_PY_SYS_PROFILING
-            if (mp_obj_is_callable(MP_STATE_VM(exitfunc))) {
-                mp_obj_t f = MP_STATE_VM(exitfunc);
-                MP_STATE_VM(exitfunc) = mp_const_none;
-                mp_call_function_0(f);
-            }
-            #endif
         }
 
         mp_hal_set_interrupt_char(-1);
@@ -319,9 +304,6 @@ STATIC int usage(char **argv) {
 "Options:\n"
 "-v : verbose (trace various operations); can be multiple\n"
 "-O[N] : apply bytecode optimizations of level N\n"
-#if MICROPY_PY_SYS_PROFILING
-"-P : enable profiling (settrace)\n"
-#endif
 "\n"
 "Implementation specific options (-X):\n", argv[0]
 );
@@ -603,10 +585,6 @@ MP_NOINLINE int main_(int argc, char **argv) {
             #if MICROPY_DEBUG_PRINTERS
             } else if (strcmp(argv[a], "-v") == 0) {
                 mp_verbose_flag++;
-            #endif
-            #if MICROPY_PY_SYS_PROFILING
-            } else if (strcmp(argv[a], "-P") == 0) {
-                MP_STATE_VM(prof_mode) = 1;
             #endif
             } else if (strncmp(argv[a], "-O", 2) == 0) {
                 if (unichar_isdigit(argv[a][2])) {

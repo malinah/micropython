@@ -119,7 +119,7 @@ void mp_setup_code_state(mp_code_state_t *code_state, size_t n_args, size_t n_kw
     code_state->prev = NULL;
     #endif
 
-    #if MICROPY_PY_SYS_PROFILING
+    #if MICROPY_PY_SYS_TRACE
     code_state->prev_state = NULL;
     code_state->frame = mp_const_none;
     code_state->next_tracing_callback = mp_const_none;

@@ -27,40 +27,17 @@
 
 #include "py/runtime.h"
 
-#if MICROPY_PY_SYS_PROFILING
+#if MICROPY_PY_SYS_TRACE
 
 #include "py/profiling.h"
 #include "py/objstr.h"
+#include "py/objfun.h"
 #include "py/emitglue.h"
 #include "py/runtime.h"
 #include "py/bc0.h"
 
 #include <stdio.h>
-
-typedef struct _mp_bytecode_prelude_t {
-    uint n_state;
-    uint n_exc_stack;
-    uint scope_flags;
-    uint n_pos_args;
-    uint n_kwonly_args;
-    uint n_def_pos_args;
-    const char* source_file;
-    qstr qstr_source_file;
-    const char* block_name;
-    qstr qstr_block_name;
-    const byte* code_info;
-    const byte* line_info;
-    const byte* locals;
-    const byte* bytecode;
-} mp_bytecode_prelude_t;
-
-typedef struct _mp_dis_instruction {
-    mp_obj_t opcode;
-    mp_obj_t opname;
-    mp_obj_t arg;
-    mp_obj_t argval;
-    mp_obj_t cache;
-} mp_dis_instruction;
+#include <string.h>
 
 #define DECODE_UINT { \
     unum = 0; \
@@ -81,7 +58,7 @@ typedef struct _mp_dis_instruction {
     DECODE_UINT; \
     obj = (mp_obj_t)const_table[unum]
 
-STATIC const byte *opcode_decode(const byte *ip, const mp_uint_t *const_table, mp_dis_instruction *instruction) {
+const byte *prof_opcode_decode(const byte *ip, const mp_uint_t *const_table, mp_dis_instruction *instruction) {
     mp_uint_t unum;
     const byte* ptr;
     mp_obj_t obj;
@@ -582,7 +559,7 @@ STATIC const byte *opcode_decode(const byte *ip, const mp_uint_t *const_table, m
     return ip;
 }
 
-STATIC uint get_line(const byte *line_info, size_t bc) {
+uint get_line(const byte *line_info, size_t bc) {
     const byte *ip = line_info;
     size_t source_line = 1;
     size_t c;
@@ -612,7 +589,11 @@ STATIC uint get_line(const byte *line_info, size_t bc) {
     return source_line;
 }
 
-STATIC void extract_prelude(const byte *bytecode, mp_bytecode_prelude_t *prelude) {
+#define WORD_SIZE			sizeof(unsigned int)
+#define ALIGN(v, a)  (((((size_t) (v))-1) | ((a)-1))+1)
+#define WORD_ALIGN(x)		ALIGN(x, WORD_SIZE)
+
+void prof_extract_prelude(const byte *bytecode, mp_bytecode_prelude_t *prelude) {
     const byte *ip = bytecode;
 
     prelude->n_state = mp_decode_uint(&ip); // ip++
@@ -634,434 +615,407 @@ STATIC void extract_prelude(const byte *bytecode, mp_bytecode_prelude_t *prelude
     qstr source_file = mp_decode_uint(&ip); // ip++
     #endif
     prelude->qstr_block_name = block_name;
-    prelude->block_name = qstr_str(block_name);
     prelude->qstr_source_file = source_file;
-    prelude->source_file = qstr_str(source_file);
 
     prelude->line_info = ip;
 
-    prelude->locals = prelude->code_info + code_info_size;
+    prelude->locals = (void*)(
+        (size_t)(prelude->code_info + code_info_size)
+         & (~(sizeof(uint)-1)) // word align
+    );
 
     ip = prelude->locals;
     while (*ip++ != 255);
     prelude->bytecode = ip;
 }
 
-void prof_rc_path(const mp_raw_code_t *rc, vstr_t *path) {
-    mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
-    extract_prelude(rc->data.u_byte.bytecode, prelude);
-    // vstr_add_str(path, vstr_str(path));
-    vstr_add_str(path, "/");
-    vstr_add_str(path, qstr_str(prelude->qstr_block_name));
+
+//
+// CODE
+//
+
+STATIC void code_print(const mp_print_t *print, mp_obj_t o_in, mp_print_kind_t kind) {
+    (void)kind;
+    mp_obj_code_t *o = MP_OBJ_TO_PTR(o_in);
+    const mp_raw_code_t *rc = o->rc;
+    const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    mp_printf(print, "<code object %q at 0x%p, file \"%q\", line %d>", prelude->qstr_block_name, o, prelude->qstr_source_file, rc->line_def);
 }
 
-STATIC mp_obj_dict_t* prof_fun_bytecode_parse_level(const mp_raw_code_t *rc, vstr_t *path, mp_obj_dict_t *bytecode_tree, mp_obj_dict_t *rc_map) {
+STATIC mp_obj_tuple_t* code_consts(const mp_raw_code_t *rc) {
 
-    mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
-    extract_prelude(rc->data.u_byte.bytecode, prelude);
+    const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    int start = prelude->n_pos_args + prelude->n_kwonly_args;
+    int stop  = start + rc->data.u_byte.n_obj + rc->data.u_byte.n_raw_code;
+    mp_obj_tuple_t *consts = mp_obj_new_tuple(stop - start, NULL);
+    size_t const_no = 0;
+    int i = 0;
 
-    vstr_t *current_path = vstr_new(vstr_len(path) + 1 /* '/' */ + qstr_len(prelude->qstr_block_name) + 1 /* '\0' */);
-    vstr_add_str(current_path, vstr_str(path));
-    vstr_add_char(current_path, '/');
-    vstr_add_str(current_path, qstr_str(prelude->qstr_block_name));
-
-    // How many instructions to parse? (needed for the tuple allocation)
-    uint instr_count = 0;
-    const byte *ip = prelude->bytecode;
-    while (ip - rc->data.u_byte.bytecode < rc->data.u_byte.bc_len) {
-        instr_count++;
-
-        size_t opcode_size = 0;
-        mp_opcode_format(ip, &opcode_size);
-
-#if 0 // find opcode size mistakes
-        mp_dis_instruction _instruction, *instruction = &_instruction;
-        const byte *next_ip = opcode_decode(ip, rc->data.u_byte.const_table, instruction);
-
-        if (opcode_size != next_ip - ip) {
-            mp_printf(&mp_plat_print, "size miss %d != %d %s\n", opcode_size, next_ip - ip, mp_obj_str_get_str(instruction->opname));
-            assert(opcode_size == next_ip - ip);
-        }
-#endif
-
-        ip += opcode_size;
+    start = 0;
+    stop  = prelude->n_pos_args + prelude->n_kwonly_args;
+    for (i = start; i < stop; i++ ) {
+        consts->items[const_no++] = (mp_obj_t)rc->data.u_byte.const_table[i];
     }
 
-    mp_obj_t bytecode = mp_obj_new_tuple(instr_count, NULL);
-    mp_obj_tuple_t *bytecode_ptr = MP_OBJ_TO_PTR(bytecode);
-    mp_obj_t *bytecode_ptr_items = bytecode_ptr->items;
+    start = prelude->n_pos_args + prelude->n_kwonly_args;
+    stop  = prelude->n_pos_args + prelude->n_kwonly_args + rc->data.u_byte.n_obj;
+    for (i = start; i < stop; i++ ) {
+        consts->items[const_no++] = (mp_obj_t)rc->data.u_byte.const_table[i];
+    }
 
-    ip = prelude->bytecode;
-    while (ip - rc->data.u_byte.bytecode < rc->data.u_byte.bc_len) {
-        mp_obj_t instr_info = mp_obj_new_tuple(7, NULL);
-        mp_obj_tuple_t *instr_info_ptr = MP_OBJ_TO_PTR(instr_info);
-        instr_info_ptr->items[0] = MP_OBJ_NEW_SMALL_INT(ip - prelude->bytecode);
-        instr_info_ptr->items[1] = MP_OBJ_NEW_SMALL_INT(get_line(prelude->line_info, ip - prelude->locals));
-        mp_dis_instruction _instruction, *instruction = &_instruction;
-        const byte *next_ip = opcode_decode(ip, rc->data.u_byte.const_table, instruction);
-        size_t opcode_size = next_ip - ip;
+    start = prelude->n_pos_args + prelude->n_kwonly_args + rc->data.u_byte.n_obj;
+    stop  = prelude->n_pos_args + prelude->n_kwonly_args + rc->data.u_byte.n_obj + rc->data.u_byte.n_raw_code;
+    for (i = start; i < stop; i++ ) {
+        consts->items[const_no++] = mp_obj_new_code((const mp_raw_code_t*)rc->data.u_byte.const_table[i]);
+    }
 
-        // Since the tuple is immutable removing the const qualifier here
-        // shuldn't matter right?
-        instr_info_ptr->items[2] = (mp_obj_t)instruction->opname;
-        instr_info_ptr->items[3] = (mp_obj_t)instruction->arg;
-        instr_info_ptr->items[4] = (mp_obj_t)instruction->argval;
-        instr_info_ptr->items[5] = (mp_obj_t)instruction->cache;
-        instr_info_ptr->items[6] = mp_obj_new_bytearray(opcode_size, (void*)ip);
-        *bytecode_ptr_items++ = instr_info;
+    return consts;
+}
 
-        switch(*ip) {
-        case MP_BC_MAKE_FUNCTION:
-        case MP_BC_MAKE_FUNCTION_DEFARGS:
-        case MP_BC_MAKE_CLOSURE:
-        case MP_BC_MAKE_CLOSURE_DEFARGS:
-            do {
-                ip++;
-                mp_uint_t unum;
-                const byte* ptr;
-                const mp_uint_t *const_table = rc->data.u_byte.const_table;
+STATIC mp_obj_t code_lnotab(const mp_raw_code_t *rc) {
+    const uint buffer_chunk_size = 128*2; // magic
+    uint buffer_size = buffer_chunk_size;
+    byte *buffer = m_new(byte, buffer_size);
+    uint buffer_index = 0;
 
-                DECODE_PTR;
-                mp_raw_code_t *sub_rc = (mp_raw_code_t*)ptr;
-                prof_fun_bytecode_parse_level(sub_rc, current_path, bytecode_tree, rc_map);
-            } while(0);
+    const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    uint start = prelude->bytecode - prelude->locals;
+    uint stop = rc->data.u_byte.bc_len - start;
+
+    uint last_lineno = get_line(prelude->line_info, prelude->bytecode - prelude->locals);
+    uint lasti = 0;
+    int i;
+    for (i = start; i < stop; i ++) {
+        uint lineno = get_line(prelude->line_info, i);
+        size_t line_diff = lineno - last_lineno;
+        if (line_diff > 0) {
+            uint instr_diff = (i - start) - lasti;
+            // mp_printf(&mp_plat_print, "lnotab %d, %d\n", instr_diff, line_diff);
+            if (buffer_index + 2 > buffer_size) {
+                assert(instr_diff < 256);
+                assert(line_diff < 256);
+                #if MICROPY_MALLOC_USES_ALLOCATED_SIZE
+                buffer = m_realloc(buffer, buffer_size, buffer_size + buffer_chunk_size);
+                #else
+                buffer = m_realloc(buffer, buffer_size + buffer_chunk_size);
+                #endif
+                buffer_size = buffer_size + buffer_chunk_size;
+            }
+            last_lineno = lineno;
+            lasti = i - start;
+            buffer[buffer_index++] = instr_diff;
+            buffer[buffer_index++] = line_diff;
+        }
+    }
+
+    mp_obj_t o = mp_obj_new_bytes(buffer, buffer_index);
+    m_free(buffer, buffer_size);
+    return o;
+}
+
+// STATIC mp_obj_t code_locals() {
+//     const byte *ip = prelude->locals;
+//     int n = 0;
+//     while(ip < prelude->bytecode) {
+//         mp_printf(&mp_plat_print, "local%d @ %p: %d\n", ip-prelude->locals, ip, *ip);
+//         ip++;
+//         n++;
+//     }
+// }
+
+STATIC void code_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+    if (dest[0] != MP_OBJ_NULL) {
+        // not load attribute
+        return;
+    }
+    mp_obj_code_t *o = MP_OBJ_TO_PTR(self_in);
+    const mp_raw_code_t *rc = o->rc;
+    const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    switch(attr) {
+        case MP_QSTR_co_code:
+            dest[0] = mp_obj_new_bytes(
+                (void*)prelude->bytecode,
+                rc->data.u_byte.bc_len - (prelude->bytecode - rc->data.u_byte.bytecode)
+            );
             break;
-        }
-
-        ip = next_ip;
+        case MP_QSTR_co_consts:
+            dest[0] = MP_OBJ_FROM_PTR(code_consts(rc));
+            break;
+        case MP_QSTR_co_filename:
+            dest[0] = MP_OBJ_NEW_QSTR(prelude->qstr_source_file);
+            break;
+        case MP_QSTR_co_firstlineno:
+            dest[0] = MP_OBJ_NEW_SMALL_INT(get_line(prelude->line_info, prelude->bytecode - prelude->locals));
+            break;
+        case MP_QSTR_co_name:
+            dest[0] = MP_OBJ_NEW_QSTR(prelude->qstr_block_name);
+            break;
+        case MP_QSTR_co_names:
+            dest[0] = MP_OBJ_FROM_PTR(o->dict_locals);
+            break;
+        case MP_QSTR_co_lnotab:
+            dest[0] = mp_obj_new_bytearray(rc->data.u_byte.bc_len - (prelude->bytecode - rc->data.u_byte.bytecode), (void*)prelude->line_info);
+            dest[0] = code_lnotab(rc);
+            break;
     }
-
-#if 0 // export bytecode constants
-    mp_printf(&mp_plat_print, "const %s 0/0:\n", current_path);
-    for(int i =0; i < prelude->n_pos_args + prelude->n_kwonly_args + rc->data.u_byte.n_obj; i++) {
-        mp_printf(&mp_plat_print, "const %s %d/%d ", current_path, i+1, prelude->n_pos_args + prelude->n_kwonly_args + rc->data.u_byte.n_obj);
-        mp_obj_print_helper(&mp_plat_print, (mp_obj_t)rc->data.u_byte.const_table[i], PRINT_STR);
-        mp_printf(&mp_plat_print, "\n");
-    }
-#endif
-
-    mp_obj_t path_obj = mp_obj_new_str_from_vstr(&mp_type_str, current_path);
-    mp_obj_t bytecode_tree_obj = MP_OBJ_FROM_PTR(bytecode_tree);
-    mp_obj_dict_store(
-        bytecode_tree_obj,
-        path_obj,
-        bytecode
-    );
-
-    if (rc_map) {
-        mp_obj_t rc_map_obj = MP_OBJ_FROM_PTR(rc_map);
-        mp_obj_dict_store(
-            rc_map_obj,
-            mp_obj_new_int_from_ull((uintptr_t)rc->data.u_byte.bytecode),
-            path_obj
-        );
-    }
-
-    vstr_free(current_path);
-    return bytecode_tree;
 }
 
-STATIC mp_obj_t dict_soft_relookup(mp_obj_dict_t *dict, mp_obj_t *keys) {
-    if (!keys || keys[0] == NULL) {
-        return MP_OBJ_NULL;
-    }
+const mp_obj_type_t mp_type_code = {
+    { &mp_type_type },
+    .name = MP_QSTR_code,
+    .print = code_print,
+    .unary_op = mp_generic_unary_op,
+    .attr = code_attr,
+};
 
-    mp_obj_t key = keys[0];
-    mp_map_elem_t* elem = mp_map_lookup(&dict->map, key, MP_MAP_LOOKUP);
-    if (!elem) {
-        return MP_OBJ_NULL;
-    }
-
-    if (keys[1] == NULL) {
-        return elem->value;
-    }
-
-    return dict_soft_relookup(MP_OBJ_TO_PTR(elem->value), keys+1);
+mp_obj_t mp_obj_new_code(const mp_raw_code_t *rc) {
+    mp_obj_code_t *o = m_new_obj(mp_obj_code_t);
+    o->base.type = &mp_type_code;
+    o->rc = rc;
+    o->dict_locals = mp_locals_get(); // this assumes wrongly! how to do this properly?
+    return MP_OBJ_FROM_PTR(o);
 }
-
-STATIC mp_obj_t prof_fun_bytecode_parse(mp_obj_t module_fun) {
-
-    mp_obj_t module_profiling = mp_obj_new_dict(0);
-    mp_obj_t prof_bytecode = mp_obj_new_dict(0);
-    mp_obj_t prof_rc_map = mp_obj_new_dict(0);
-    mp_obj_dict_store(
-        module_profiling,
-        MP_ROM_QSTR(MP_QSTR_bytecode),
-        prof_bytecode
-    );
-    mp_obj_dict_store(
-        module_profiling,
-        MP_ROM_QSTR(MP_QSTR_rc_map),
-        prof_rc_map
-    );
-    // mp_obj_dict_store(
-    //     module_profiling,
-    //     MP_ROM_QSTR(MP_QSTR_module_fun),
-    //     module_fun
-    // );
-
-    mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(module_fun);
-
-    vstr_t *path = vstr_new(3);
-    vstr_add_str(path, "");
-    prof_fun_bytecode_parse_level(fun->rc, path, MP_OBJ_TO_PTR(prof_bytecode), MP_OBJ_TO_PTR(prof_rc_map));
-    vstr_free(path);
-    return module_profiling;
-}
-
 
 //
-// exported functions
+// FRAME
 //
 
-void prof_module_parse_store(mp_obj_t module_fun) {
+STATIC void frame_print(const mp_print_t *print, mp_obj_t o_in, mp_print_kind_t kind) {
+    (void)kind;
+    mp_obj_frame_t *frame = MP_OBJ_TO_PTR(o_in);
+    mp_obj_code_t *code = frame->code;
+    const mp_raw_code_t *rc = code->rc;
+    const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    mp_printf(print, "<frame at 0x%p, file '%q', line %d, code %q>", frame, prelude->qstr_source_file, frame->lineno, prelude->qstr_block_name);
+}
 
-    return;
-
-    mp_obj_t parse = mp_const_none;
-    if (mp_map_lookup(&mp_globals_get()->map, MP_ROM_QSTR(MP_QSTR___profiling__), MP_MAP_LOOKUP)) {
-
-        mp_obj_t module_profiling = mp_load_global(MP_QSTR___profiling__);
-        mp_obj_t prof_bytecode = mp_obj_dict_get(module_profiling, MP_ROM_QSTR(MP_QSTR_bytecode));
-        mp_obj_t prof_rc_map = mp_obj_dict_get(module_profiling, MP_ROM_QSTR(MP_QSTR_rc_map));
-
-        mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(module_fun);
-
-        vstr_t *path = vstr_new(4);
-        vstr_add_str(path, "");
-        prof_fun_bytecode_parse_level(fun->rc, path, MP_OBJ_TO_PTR(prof_bytecode), MP_OBJ_TO_PTR(prof_rc_map));
-        vstr_free(path);
-    } else {
-        parse = prof_fun_bytecode_parse(module_fun);
-        mp_store_global(MP_QSTR___profiling__, parse);
+STATIC void frame_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+    if (dest[0] != MP_OBJ_NULL) {
+        // not load attribute
+        return;
+    }
+    mp_obj_frame_t *o = MP_OBJ_TO_PTR(self_in);;
+    // mp_obj_code_t *code = o->code;
+    // const mp_raw_code_t *rc = code->rc;
+    // const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    switch(attr) {
+        case MP_QSTR_f_back:
+            dest[0] = mp_const_none;
+            if (o->code_state->prev_state) {
+                dest[0] = o->code_state->prev_state->frame;
+            }
+            break;
+        case MP_QSTR_f_code:
+            dest[0] = o->code;
+            break;
+        case MP_QSTR_f_globals:
+            dest[0] = o->code_state->fun_bc->globals;
+            break;
+        case MP_QSTR_f_lasti:
+            dest[0] = MP_OBJ_NEW_SMALL_INT(o->lasti);
+            break;
+        case MP_QSTR_f_lineno:
+            dest[0] = MP_OBJ_NEW_SMALL_INT(o->lineno);
+            break;
     }
 }
 
-mp_obj_t prof_module_bytecode(mp_obj_t module) {
-    mp_obj_t bytecode = dict_soft_relookup(
-        ((mp_obj_module_t*)MP_OBJ_TO_PTR(module))->globals,
-        (mp_obj_t[]){
-            MP_ROM_QSTR(MP_QSTR___profiling__),
-            MP_ROM_QSTR(MP_QSTR_bytecode),
-            NULL
-        }
-    );
+const mp_obj_type_t mp_type_frame = {
+    { &mp_type_type },
+    .name = MP_QSTR_frame,
+    .print = frame_print,
+    .unary_op = mp_generic_unary_op,
+    .attr = frame_attr,
+};
 
-    if (!bytecode) {
-        return mp_const_none;
+mp_obj_t mp_obj_new_frame(const mp_code_state_t *code_state) {
+    mp_obj_frame_t *o = m_new_obj(mp_obj_frame_t);
+    mp_obj_code_t *code = o->code = mp_obj_new_code(code_state->fun_bc->rc);
+    const mp_raw_code_t *rc = code->rc;
+    const mp_bytecode_prelude_t *prelude = &rc->data.u_byte.prelude;
+    o->code_state = code_state;
+    o->base.type = &mp_type_frame;
+    o->back = NULL;
+    o->code = code;
+    // code->dict_locals = code_state->fun_bc->base.type->locals_dict;
+    o->lasti = code_state->ip - prelude->locals;
+    o->lineno = get_line(prelude->line_info, o->lasti);
+    o->trace_opcodes = false;
+
+    size_t n_state = mp_decode_uint_value(code_state->fun_bc->bytecode);
+    mp_obj_t const * fastn = &code_state->state[n_state - 1];
+    const byte *ip = prelude->locals;
+    while(*ip != 255) {
+        mp_printf(&mp_plat_print, "fastn[-%d] %p\n", *ip, fastn[-(*ip)]);
+        ip++;
     }
-
-    return bytecode;
+    // int i;
+    // for (i = 1; i<n_state; i++) {
+    //     // mp_printf(&mp_plat_print, "n_state[%d] %x\n", i, code_state->state[i]);
+    //     mp_printf(&mp_plat_print, "fastn[%d] %p\n", i, fastn[i]);
+    // }
+    return MP_OBJ_FROM_PTR(o);
 }
 
 mp_obj_t prof_build_frame(mp_code_state_t *code_state) {
 
+    return MP_OBJ_FROM_PTR(mp_obj_new_frame(code_state));
+
+    assert(code_state != code_state->prev_state);
+
     const byte *ip = code_state->ip;
 
-    mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
-    extract_prelude(code_state->fun_bc->bytecode, prelude);
+    const mp_bytecode_prelude_t *prelude = &code_state->fun_bc->rc->data.u_byte.prelude;
 
-    //
-    // CODE
-    //
-    static const qstr code_fields[] = {
-        MP_QSTR_co_filename,
-        MP_QSTR_co_name,
-        MP_QSTR_co_codepath,
-    };
-    mp_obj_tuple_t *code_attr = mp_obj_new_attrtuple(
-        code_fields,
-        MP_ARRAY_SIZE(code_fields),
-        NULL
-    );
-    code_attr->items[0] = MP_OBJ_NEW_QSTR(prelude->qstr_source_file);
-    code_attr->items[1] = MP_OBJ_NEW_QSTR(prelude->qstr_block_name);
 
-    mp_obj_t rc_map = NULL;
-    mp_obj_t codepath = mp_const_none;
-
-    rc_map = dict_soft_relookup(mp_globals_get(), (mp_obj_t[]){
-        MP_ROM_QSTR(MP_QSTR___profiling__),
-        MP_ROM_QSTR(MP_QSTR_rc_map),
-        NULL}
-    );
-
-    if (rc_map) {
-        codepath = mp_obj_dict_get(rc_map, mp_obj_new_int_from_ull((uintptr_t)code_state->fun_bc->bytecode));
-    }
-
-    codepath = MP_OBJ_NEW_QSTR(prelude->qstr_block_name);
-
-    // codepath = code_state->fun_bc->path;
-    code_attr->items[2] = codepath;
-    mp_obj_t code = MP_OBJ_FROM_PTR(code_attr);
+    mp_obj_t *code = mp_obj_new_code(code_state->fun_bc->rc);
 
     //
     // FRAME
     //
-    mp_obj_t frame = mp_const_none;
     static const qstr frame_fields[] = {
+        MP_QSTR_f_back,
+        // MP_QSTR_f_builtins,
         MP_QSTR_f_code,
+        MP_QSTR_f_globals,
+        MP_QSTR_f_lasti,
         MP_QSTR_f_lineno,
-        MP_QSTR_f_instroffset,
-        MP_QSTR_f_modulename,
-        MP_QSTR_f_back
+        MP_QSTR_f_locals,
+        // MP_QSTR_f_trace,
+        MP_QSTR_f_trace_opcodes,
     };
-
-    frame = mp_obj_new_attrtuple(
+    mp_obj_t frame = mp_obj_new_attrtuple(
         frame_fields,
         MP_ARRAY_SIZE(frame_fields),
         NULL
     );
     mp_obj_tuple_t *frame_attr = MP_OBJ_TO_PTR(frame);
-    frame_attr->items[0] = code;
-    frame_attr->items[1] = MP_OBJ_NEW_SMALL_INT(
-        get_line(prelude->line_info, ip - prelude->locals)
-    );
-    frame_attr->items[2] = MP_OBJ_NEW_SMALL_INT(
+
+    frame_attr->items[0] = code_state->prev_state ?
+            code_state->prev_state->frame : mp_const_false;
+    frame_attr->items[1] = code;
+    frame_attr->items[2] = mp_globals_get();
+    frame_attr->items[3] = MP_OBJ_NEW_SMALL_INT(
         ip - prelude->bytecode
     );
-    frame_attr->items[3] = mp_map_lookup(
-        &mp_globals_get()->map,
-        MP_ROM_QSTR(MP_QSTR___name__),
-        MP_MAP_LOOKUP
-    )->value;
-    if (code_state == code_state->prev_state) {
-        __asm("int $4");
-        code_state->prev_state = NULL;
-    }
-    frame_attr->items[4] = code_state->prev_state ? code_state->prev_state->frame : mp_const_false;
+    frame_attr->items[4] = MP_OBJ_NEW_SMALL_INT(
+        get_line(prelude->line_info, ip - prelude->locals)
+    );
+    frame_attr->items[5] = mp_locals_get();
+    frame_attr->items[6] = mp_const_true;
 
     return frame;
 }
 
+mp_obj_t prof_settrace(mp_obj_t callback) {
+    if (mp_obj_is_callable(callback)) {
+        MP_STATE_THREAD(prof_call_trace_callback) = callback;
+    } else {
+        MP_STATE_THREAD(prof_call_trace_callback) = mp_const_none;
+    }
+    return mp_const_none;
+}
+
+mp_obj_t prof_callback_invoke(mp_obj_t callback, prof_callback_args *args) {
+
+    assert(mp_obj_is_callable(callback));
+    
+    MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = true;
+
+    mp_obj_t a[3] = {args->frame, args->event, args->arg};
+    mp_obj_t top = mp_call_function_n_kw(callback, 3, 0, a);
+
+    MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
+
+    if (MP_STATE_VM(mp_pending_exception) != MP_OBJ_NULL) {
+        mp_obj_t obj = MP_STATE_VM(mp_pending_exception);
+        MP_STATE_VM(mp_pending_exception) = MP_OBJ_NULL;
+        nlr_raise(obj);
+    }
+    return top;
+}
+
 mp_obj_t prof_instr_tick(mp_code_state_t *code_state, bool isException) {
 
+    // Detecet execution recursion.
+    assert(!MP_STATE_THREAD(prof_instr_tick_callback_is_executing));
+
+    // Detecet data recursion.
+    assert(code_state != code_state->prev_state);
+
+    mp_obj_t top = mp_const_none;
+    mp_obj_t callback = MP_STATE_THREAD(prof_instr_tick_callback);
+
+    prof_callback_args _args, *args=&_args;
+    args->frame = code_state->frame;
+    args->event = mp_const_none;
+    args->arg = mp_const_none;
+
+    // CALL event's are handled inside the vm.c
+
+    // EXCEPTION
+    if (isException) {
+        args->event = MP_ROM_QSTR(MP_QSTR_exception);
+        top = prof_callback_invoke(callback, args);
+        return top;
+    }
+
+    // LINE
+    const mp_bytecode_prelude_t *prelude = &code_state->fun_bc->rc->data.u_byte.prelude;
+    
+    size_t prev_line_no = args->frame->lineno;;
+    size_t current_line_no = get_line(prelude->line_info, code_state->ip - prelude->locals);
+    if (prev_line_no != current_line_no) {
+        args->frame->lineno = current_line_no;
+        args->event = MP_ROM_QSTR(MP_QSTR_line);
+        top = prof_callback_invoke(callback, args);
+    }
+#if false // old
+    const mp_bytecode_prelude_t *prelude = &code_state->fun_bc->rc->data.u_byte.prelude;
+    size_t prev_line_no = MP_OBJ_SMALL_INT_VALUE(((mp_obj_tuple_t*)MP_OBJ_TO_PTR(args->frame))->items[4]);
+    size_t current_line_no = get_line(prelude->line_info, code_state->ip - prelude->locals);
+    if (prev_line_no != current_line_no) {
+        ((mp_obj_tuple_t*)MP_OBJ_TO_PTR(args->frame))->items[4] = MP_OBJ_NEW_SMALL_INT(current_line_no);
+        args->event = MP_ROM_QSTR(MP_QSTR_line);
+        top = prof_callback_invoke(callback, args);
+    }
+#endif
+
+    // RETURN
     const byte *ip = code_state->ip;
-
-    mp_obj_t frame = mp_const_none;
-    mp_obj_t event = mp_const_none;
-    mp_obj_t arg = mp_const_none;
-
-    mp_bytecode_prelude_t _prelude, *prelude = &_prelude;
-    extract_prelude(code_state->fun_bc->bytecode, prelude);
-
-    //
-    // CODE
-    //
-    static const qstr code_fields[] = {
-        MP_QSTR_co_filename,
-        MP_QSTR_co_name,
-        MP_QSTR_co_codepath,
-    };
-    mp_obj_tuple_t *code_attr = mp_obj_new_attrtuple(
-        code_fields,
-        MP_ARRAY_SIZE(code_fields),
-        NULL
-    );
-    code_attr->items[0] = MP_OBJ_NEW_QSTR(prelude->qstr_source_file);
-    code_attr->items[1] = MP_OBJ_NEW_QSTR(prelude->qstr_block_name);
-
-    mp_obj_t rc_map = NULL;
-    mp_obj_t codepath = mp_const_none;
-
-    rc_map = dict_soft_relookup(mp_globals_get(), (mp_obj_t[]){
-        MP_ROM_QSTR(MP_QSTR___profiling__),
-        MP_ROM_QSTR(MP_QSTR_rc_map),
-        NULL}
-    );
-
-    if (rc_map) {
-        codepath = mp_obj_dict_get(rc_map, mp_obj_new_int_from_ull((uintptr_t)code_state->fun_bc->bytecode));
+    if (*ip == MP_BC_RETURN_VALUE || *ip == MP_BC_YIELD_VALUE) {
+        args->event = MP_ROM_QSTR(MP_QSTR_return);
+        top = prof_callback_invoke(callback, args);
+        if (code_state->prev_state && *ip == MP_BC_RETURN_VALUE) {
+            code_state->next_tracing_callback = mp_const_none;
+        }
     }
 
-    // codepath = code_state->fun_bc->path;
-    code_attr->items[2] = codepath;
-    mp_obj_t code = MP_OBJ_FROM_PTR(code_attr);
-
-    //
-    // FRAME
-    //
-    static const qstr frame_fields[] = {
-        MP_QSTR_f_code,
-        MP_QSTR_f_lineno,
-        MP_QSTR_f_instroffset,
-        MP_QSTR_f_modulename,
-        MP_QSTR_f_back,
-        MP_QSTR_f_disasm
-    };
-
-    code_state->frame = frame = mp_obj_new_attrtuple(
-        frame_fields,
-        MP_ARRAY_SIZE(frame_fields),
-        NULL
-    );
-    mp_obj_tuple_t *frame_attr = MP_OBJ_TO_PTR(frame);
-    frame_attr->items[0] = code;
-    frame_attr->items[1] = MP_OBJ_NEW_SMALL_INT(
-        get_line(prelude->line_info, ip - prelude->locals)
-    );
-    frame_attr->items[2] = MP_OBJ_NEW_SMALL_INT(
-        ip - prelude->bytecode
-    );
-    frame_attr->items[3] = mp_map_lookup(
-        &mp_globals_get()->map,
-        MP_ROM_QSTR(MP_QSTR___name__),
-        MP_MAP_LOOKUP
-    )->value;
-    if (code_state == code_state->prev_state) {
-        __asm("int $4");
-        code_state->prev_state = NULL;
-    }
-    frame_attr->items[4] = code_state->prev_state ? code_state->prev_state->frame : mp_const_false;
-
-    // parse instruction
-    mp_obj_t instr_info = mp_obj_new_tuple(7, NULL);
-    mp_obj_tuple_t *instr_info_ptr = MP_OBJ_TO_PTR(instr_info);
-    instr_info_ptr->items[0] = MP_OBJ_NEW_SMALL_INT(ip - prelude->bytecode);
-    instr_info_ptr->items[1] = MP_OBJ_NEW_SMALL_INT(get_line(prelude->line_info, ip - prelude->locals));
-    mp_dis_instruction _instruction, *instruction = &_instruction;
-    const byte *next_ip = opcode_decode(ip, code_state->fun_bc->rc->data.u_byte.const_table, instruction);
-    size_t opcode_size = next_ip - ip;
-
-    // Since the tuple is immutable removing the const qualifier here
-    // shuldn't matter right?
-    instr_info_ptr->items[2] = (mp_obj_t)instruction->opname;
-    instr_info_ptr->items[3] = (mp_obj_t)instruction->arg;
-    instr_info_ptr->items[4] = (mp_obj_t)instruction->argval;
-    instr_info_ptr->items[5] = (mp_obj_t)instruction->cache;
-    instr_info_ptr->items[6] = mp_obj_new_bytearray(opcode_size, (void*)ip);
-    frame_attr->items[5] = instr_info;
-
-    switch (*ip) {
-        case MP_BC_RETURN_VALUE:
-            event = MP_ROM_QSTR(MP_QSTR_return);
-            break;
-        case MP_BC_CALL_FUNCTION:
-        case MP_BC_CALL_FUNCTION_VAR_KW:
-        case MP_BC_CALL_METHOD:
-        case MP_BC_CALL_METHOD_VAR_KW:
-            event = MP_ROM_QSTR(MP_QSTR_call);
-            break;
-        default:
-            event = MP_ROM_QSTR(MP_QSTR_line);
+    // OPCODE
+    if (false) {
+        args->event = MP_ROM_QSTR(MP_QSTR_opcode);
+        top = prof_callback_invoke(callback, args);
     }
 
-    if (MP_STATE_VM(cur_exception) && isException) {
-        event = MP_ROM_QSTR(MP_QSTR_exception);
-        mp_obj_t e[] = {mp_const_false, MP_STATE_VM(cur_exception), mp_const_false};
-        arg = mp_obj_new_tuple(3, e);
-    }
-
-    mp_obj_t args[3];
-    args[0] = frame;
-    args[1] = event;
-    args[2] = arg;
-
-    MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = true;
-    mp_obj_t top = mp_call_function_n_kw(MP_STATE_THREAD(prof_instr_tick_callback), 3, 0, args);
     MP_STATE_THREAD(prof_instr_tick_callback_is_executing) = false;
     return top;
 }
 
-#endif // MICROPY_PY_SYS_PROFILING
+void prof_function_def_line(mp_obj_t fun, mp_code_state_t *code_state) {
+    const mp_bytecode_prelude_t *prelude = &code_state->fun_bc->rc->data.u_byte.prelude;
+    mp_obj_t line_no = MP_OBJ_NEW_SMALL_INT(get_line(prelude->line_info, code_state->ip - prelude->locals));
+    if (mp_obj_get_type(fun) == &mp_type_fun_bc) {
+        mp_obj_fun_bc_t *self_fun = (mp_obj_fun_bc_t*)fun;
+        self_fun->line_def = line_no;
+    } else if (mp_obj_get_type(fun) == &mp_type_gen_wrap) {
+        mp_obj_gen_wrap_t *self_gen = (mp_obj_gen_wrap_t *)fun;
+        mp_obj_fun_bc_t *self_fun = (mp_obj_fun_bc_t*)self_gen->fun;
+        assert(self_fun->base.type == &mp_type_fun_bc);
+        self_fun->line_def = line_no;
+    } else {
+        mp_printf(&mp_plat_print, "unmakeable %s %p\n", mp_obj_get_type_str(fun), mp_obj_get_type(fun));
+        assert(!"dunno how to handle this");
+    }
+}
+
+#endif // MICROPY_PY_SYS_TRACE
